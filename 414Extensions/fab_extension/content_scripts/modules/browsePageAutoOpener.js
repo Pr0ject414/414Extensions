@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/content_scripts/modules/browsePageAutoOpener.js
+// 414Extensions/fab_extension/content_scripts/modules/browsePageAutoOpener.js
 
 window.FabContentModules = window.FabContentModules || {};
 

@@ -1,4 +1,4 @@
-// KylesChromeExtensions/shared_modules/appState.js
+// 414Extensions/shared_modules/appState.js
 import * as CoreConstants from './coreConstants.js';
 import { loadStateFromStorage, saveStateToStorage } from './storageUtils.js';
 

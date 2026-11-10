@@ -1,4 +1,4 @@
-// KylesChromeExtensions/shared_modules/coreConstants.js
+// 414Extensions/shared_modules/coreConstants.js
 
 // Master on/off switch for the entire extension
 export const GLOBAL_MASTER_SWITCH_ENABLED_KEY = 'isGlobalMasterSwitchEnabled';

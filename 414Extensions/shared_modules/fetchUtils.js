@@ -1,4 +1,4 @@
-// KylesChromeExtensions/shared_modules/fetchUtils.js
+// 414Extensions/shared_modules/fetchUtils.js
 import * as AppState from './appState.js'; // For setRateLimitCoolDown and dynamic settings
 
 export async function fetchWithBackoff(url, options, attempt = 1) {

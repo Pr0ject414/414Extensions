@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Kyles Chrome Extensions",
+  "name": "414 Extensions",
   "version": "1.7",
-  "description": "A collection of Chrome Extensions created by Kyle.",
+  "description": "Modular productivity, automation, media enhancements, and transparency suite.",
   "permissions": [
     "storage",
     "activeTab",

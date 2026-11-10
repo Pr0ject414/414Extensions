@@ -1,4 +1,4 @@
-// KylesChromeExtensions/volume_controller/content_scripts/volumeControl.js
+// 414Extensions/volume_controller/content_scripts/volumeControl.js
 (function() {
     if (window.hasVolumeControlInjected) return;
     window.hasVolumeControlInjected = true;

@@ -1,4 +1,4 @@
-// KylesChromeExtensions/youtube_extension/youtubeBackground.js
+// 414Extensions/youtube_extension/youtubeBackground.js
 import * as YouTubeState from './background_modules/youtubeState.js';
 import * as AppState from '../shared_modules/appState.js';
 

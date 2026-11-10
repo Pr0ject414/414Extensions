@@ -1,5 +1,5 @@
 
-// KylesChromeExtensions/x_extension/content_scripts/xEnv.js
+// 414Extensions/x_extension/content_scripts/xEnv.js
 (function() {
     // Prevent double injection
     if (window.hasXEnvInjected) return;

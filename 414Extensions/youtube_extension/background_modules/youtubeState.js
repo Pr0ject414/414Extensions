@@ -1,4 +1,4 @@
-// KylesChromeExtensions/youtube_extension/background_modules/youtubeState.js
+// 414Extensions/youtube_extension/background_modules/youtubeState.js
 import * as YouTubeConstants from './youtubeConstants.js';
 import { loadStateFromStorage, saveStateToStorage } from '../../shared_modules/storageUtils.js';
 

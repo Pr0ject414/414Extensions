@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/content_scripts/fabBrowsePage.js
+// 414Extensions/fab_extension/content_scripts/fabBrowsePage.js
 
 (function() {
     // GUARD CLAUSE: Check if this script has already been loaded on this page.

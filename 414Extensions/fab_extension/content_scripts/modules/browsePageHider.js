@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/content_scripts/modules/browsePageHider.js
+// 414Extensions/fab_extension/content_scripts/modules/browsePageHider.js
 
 window.FabContentModules = window.FabContentModules || {};
 

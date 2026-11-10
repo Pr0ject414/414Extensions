@@ -1,4 +1,4 @@
-// KylesChromeExtensions/youtube_extension/content_scripts/autoHD.js
+// 414Extensions/youtube_extension/content_scripts/autoHD.js
 /*
     Copyright (C) 2024 YouTube Auto HD (https://github.com/avi12/youtube-auto-hd)
     

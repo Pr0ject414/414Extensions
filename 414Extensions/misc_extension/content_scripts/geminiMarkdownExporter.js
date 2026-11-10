@@ -1,4 +1,4 @@
-// KylesChromeExtensions/misc_extension/content_scripts/geminiMarkdownExporter.js
+// 414Extensions/misc_extension/content_scripts/geminiMarkdownExporter.js
 (function () {
     'use strict';
 

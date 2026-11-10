@@ -256,7 +256,7 @@ describe('XHostCoordinator & WebView Bridge Integration', () => {
             ensureCryptoPolyfill();
             expect(globalThis.crypto.subtle).toBeDefined();
 
-            const selfInfo = await deriveSelfSyncInfo('kyle@pixel.dev');
+            const selfInfo = await deriveSelfSyncInfo('user414@pixel.dev');
             const payload = { hello: 'pixel-hermes', list: [1, 2, 3] };
             const encrypted = await encryptJson(payload, selfInfo.selfKeyHex);
             const decrypted = await decryptJson(encrypted, selfInfo.selfKeyHex);

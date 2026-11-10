@@ -44,7 +44,7 @@ describe('xNostrCrypto', () => {
 
     test('should encrypt and decrypt JSON payloads with AES-256-GCM', async () => {
         const keyHex = generateSecretKeyHex();
-        const original = { ids: ['1848392019283746512', '1848392019283746599'], email: 'kyle@test.com' };
+        const original = { ids: ['1848392019283746512', '1848392019283746599'], email: 'user414@test.com' };
 
         const encrypted = await encryptJson(original, keyHex);
         expect(typeof encrypted).toBe('string');
@@ -72,9 +72,9 @@ describe('xNostrCrypto', () => {
     });
 
     test('should deterministically derive self-sync tag and AES-256 key from normalized email and passphrase', async () => {
-        const desktopSelf = await deriveSelfSyncInfo('  Kyle@Example.com ');
-        const mobileSelf = await deriveSelfSyncInfo('kyle@example.com');
-        const withPassphrase = await deriveSelfSyncInfo('kyle@example.com', 'secret-pin');
+        const desktopSelf = await deriveSelfSyncInfo('  User414@Example.com ');
+        const mobileSelf = await deriveSelfSyncInfo('user414@example.com');
+        const withPassphrase = await deriveSelfSyncInfo('user414@example.com', 'secret-pin');
 
         expect(desktopSelf.selfTag).toMatch(/^414x-self-[0-9a-f]{32}$/);
         expect(desktopSelf.selfKeyHex).toMatch(/^[0-9a-f]{64}$/);

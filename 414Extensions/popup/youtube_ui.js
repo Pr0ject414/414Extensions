@@ -1,4 +1,4 @@
-// KylesChromeExtensions/popup/youtube_ui.js
+// 414Extensions/popup/youtube_ui.js
 document.addEventListener('DOMContentLoaded', () => {
     // YouTube Helper Toggles
     const youTubeModulePowerToggle = document.getElementById('youTubeModulePowerToggle');

@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/content_scripts/fabProductPage.js
+// 414Extensions/fab_extension/content_scripts/fabProductPage.js
 
 (function() {
     // GUARD CLAUSE: Prevent the script from running multiple times

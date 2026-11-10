@@ -1,4 +1,4 @@
-// KylesChromeExtensions/popup/crunchyroll_ui.js
+// 414Extensions/popup/crunchyroll_ui.js
 document.addEventListener('DOMContentLoaded', () => {
     const crunchyrollModulePowerToggle = document.getElementById('crunchyrollModulePowerToggle');
     const crunchyrollAutoCloseEndSlateToggle = document.getElementById('crunchyrollAutoCloseEndSlateToggle');

@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/content_scripts/modules/productPageDomScraper.js
+// 414Extensions/fab_extension/content_scripts/modules/productPageDomScraper.js
 
 window.FabContentModules = window.FabContentModules || {};
 

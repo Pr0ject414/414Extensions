@@ -1,4 +1,4 @@
-// KylesChromeExtensions/popup/misc_ui.js
+// 414Extensions/popup/misc_ui.js
 document.addEventListener('DOMContentLoaded', () => {
     const miscModulePowerToggle = document.getElementById('miscModulePowerToggle');
     const googleImagesHideSaveToggle = document.getElementById('googleImagesHideSaveToggle');

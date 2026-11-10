@@ -1,4 +1,4 @@
-// KylesChromeExtensions/shared_modules/moduleManager.js
+// 414Extensions/shared_modules/moduleManager.js
 
 export class ModuleManager {
     constructor() {

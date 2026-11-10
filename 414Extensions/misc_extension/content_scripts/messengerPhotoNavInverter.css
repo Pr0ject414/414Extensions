@@ -1,4 +1,4 @@
-/* KylesChromeExtensions/misc_extension/content_scripts/messengerPhotoNavInverter.css */
+/* 414Extensions/misc_extension/content_scripts/messengerPhotoNavInverter.css */
 
 html.ext414-invert-messenger-photo-nav .ext414-messenger-photo-nav-row {
     flex-direction: row-reverse !important;

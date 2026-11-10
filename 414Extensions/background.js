@@ -1,4 +1,4 @@
-// KylesChromeExtensions/background.js
+// 414Extensions/background.js
 import { moduleManager } from './shared_modules/moduleManager.js';
 import * as AppState from './shared_modules/appState.js';
 

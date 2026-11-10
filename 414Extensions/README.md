@@ -1,4 +1,4 @@
-# 414 Extensions (Kyle's Chrome Extensions)
+# 414 Extensions
 
 [![Manifest V3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-blue.svg)](https://developer.chrome.com/docs/extensions/mv3/)
 [![Version: 1.7](https://img.shields.io/badge/Version-1.7-green.svg)](manifest.json)
@@ -128,7 +128,7 @@ This project incorporates and builds upon several outstanding open-source projec
 | **Twemoji Flag SVGs** | [twitter/twemoji](https://github.com/twitter/twemoji) | Twitter / X Open Source | **CC-BY 4.0** | Vector country flags loaded dynamically via official CDN endpoints (`abs-0.twimg.com/emoji/v2/svg/`). |
 | **Noble Cryptography** | [@noble/hashes](https://github.com/paulmillr/noble-hashes) & [@noble/ciphers](https://github.com/paulmillr/noble-ciphers) | Paul Miller ([@paulmillr](https://github.com/paulmillr)) | **MIT** | Cryptographic primitives for secp256k1, SHA-256, and AES-GCM utilized in Nostr synchronization. |
 
-All original modules (FAB Helper, Crunchyroll Helper, Volume Booster, Gemini Markdown Exporter, Google Images Save Hider, Messenger Photo Nav Inverter, X Ad Stealth Blocker, X Video/HLS Downloader, Nostr Friends Sync Engine, and the Unified Extension Coordinator) are authored by **Kyle / Pr0ject414**.
+All original modules (FAB Helper, Crunchyroll Helper, Volume Booster, Gemini Markdown Exporter, Google Images Save Hider, Messenger Photo Nav Inverter, X Ad Stealth Blocker, X Video/HLS Downloader, Nostr Friends Sync Engine, and the Unified Extension Coordinator) are authored by **Pr0ject414**.
 
 ---
 

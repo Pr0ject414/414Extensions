@@ -107,13 +107,13 @@ describe('xLocationUI.js', () => {
         const container = document.createElement('div');
         const userHeader = document.createElement('div');
         const handleLink = document.createElement('a');
-        handleLink.textContent = '@kyle';
+        handleLink.textContent = '@user414';
         userHeader.appendChild(handleLink);
         container.appendChild(userHeader);
         document.body.appendChild(container);
 
         // 1. Render seen badge first (e.g., before location loads or when location is disabled)
-        window.XLocationUI.renderFriendSeenBadge(container, 'kyle', ['friend1@test.com', 'friend2@test.com']);
+        window.XLocationUI.renderFriendSeenBadge(container, 'user414', ['friend1@test.com', 'friend2@test.com']);
 
         const seenBadge = container.querySelector('.x-friend-seen-badge');
         expect(seenBadge).not.toBeNull();
@@ -122,7 +122,7 @@ describe('xLocationUI.js', () => {
 
         // 2. Render location badge afterward -> should share the same .x-location-inline-badge container
         window.XLocationUI.renderInlineBadge(container, {
-            screenName: 'kyle',
+            screenName: 'user414',
             location: 'United States',
             device: 'Twitter Web App'
         });

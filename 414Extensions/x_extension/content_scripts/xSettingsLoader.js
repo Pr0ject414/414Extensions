@@ -1,4 +1,4 @@
-// KylesChromeExtensions/x_extension/content_scripts/xSettingsLoader.js
+// 414Extensions/x_extension/content_scripts/xSettingsLoader.js
 (function() {
     // Keys matched to coreConstants.js
     const GLOBAL_MASTER_SWITCH_ENABLED_KEY = 'isGlobalMasterSwitchEnabled';

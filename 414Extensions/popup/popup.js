@@ -1,4 +1,4 @@
-// KylesChromeExtensions/popup/popup.js
+// 414Extensions/popup/popup.js
 document.addEventListener('DOMContentLoaded', () => {
     // --- Global Elements ---
     const globalMasterSwitchToggle = document.getElementById('globalMasterSwitchToggle');

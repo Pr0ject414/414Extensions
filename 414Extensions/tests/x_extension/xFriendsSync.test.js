@@ -435,28 +435,28 @@ describe('XFriendsSyncManager', () => {
             xVolumeLevel: 42
         });
 
-        await desktopManager.setIdentity('kyle@pixel.dev', 'Kyle');
+        await desktopManager.setIdentity('user414@pixel.dev', 'User414');
         await desktopManager.markTweetsSeen(['1850000000000000701']);
         await desktopManager.forceTweetToFriends('1850000000000000702', {
-            screenName: 'kyle',
-            authorName: 'Kyle',
+            screenName: 'user414',
+            authorName: 'User414',
             text: 'Forced from Desktop'
         });
         await desktopManager.addFriend('bob@example.com', 'Bob');
 
         const desktopKeys = { ...desktopManager.state.identity };
 
-        // 2. Friend Bob accepts Kyle and forces a post to Kyle
+        // 2. Friend Bob accepts User414 and forces a post to User414
         storageMap.clear();
         await friendBob.setIdentity('bob@example.com', 'Bob');
-        await friendBob.acceptFriend('kyle@pixel.dev');
+        await friendBob.acceptFriend('user414@pixel.dev');
         await friendBob.forceTweetToFriends('1850000000000000888', {
             screenName: 'bob',
             authorName: 'Bob',
             text: 'Check this out on your Pixel!'
         });
 
-        // 3. Mobile Pixel starts with empty storage and signs in with the same email 'kyle@pixel.dev'
+        // 3. Mobile Pixel starts with empty storage and signs in with the same email 'user414@pixel.dev'
         storageMap.clear();
         const notifications = [];
         const mobileManager = new XFriendsSyncManager({
@@ -465,13 +465,13 @@ describe('XFriendsSyncManager', () => {
             onNotification: (notif) => notifications.push(notif)
         });
 
-        const mobilePublicState = await mobileManager.setIdentity('kyle@pixel.dev');
+        const mobilePublicState = await mobileManager.setIdentity('user414@pixel.dev');
 
         // Mobile should have automatically adopted Desktop's canonical Nostr keypair and seenFeedKeyHex
         expect(mobileManager.state.identity.privKeyHex).toBe(desktopKeys.privKeyHex);
         expect(mobileManager.state.identity.pubkeyHex).toBe(desktopKeys.pubkeyHex);
         expect(mobileManager.state.identity.seenFeedKeyHex).toBe(desktopKeys.seenFeedKeyHex);
-        expect(mobileManager.state.identity.displayName).toBe('Kyle');
+        expect(mobileManager.state.identity.displayName).toBe('User414');
 
         // Mobile should have inherited Desktop's seen posts, forced posts, and connected friend Bob
         expect(mobileManager.mySeenSet.has('1850000000000000701')).toBe(true);

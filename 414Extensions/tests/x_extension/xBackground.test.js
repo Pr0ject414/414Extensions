@@ -144,7 +144,7 @@ describe('xBackground', () => {
             action: 'X_FORCE_TWEET_TO_FRIENDS',
             payload: {
                 tweetId: '1850000000000000123',
-                meta: { screenName: 'kyle', authorName: 'Kyle', text: 'Forced tweet' }
+                meta: { screenName: 'user414', authorName: 'User414', text: 'Forced tweet' }
             }
         }, {}, sendResponseForce);
         expect(handledForce).toBe(true);

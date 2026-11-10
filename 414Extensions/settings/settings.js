@@ -1,4 +1,4 @@
-// KylesChromeExtensions/settings/settings.js
+// 414Extensions/settings/settings.js
 document.addEventListener('DOMContentLoaded', () => {
     // Global Network Settings Elements
     const maxRetriesInput = document.getElementById('maxRetries');

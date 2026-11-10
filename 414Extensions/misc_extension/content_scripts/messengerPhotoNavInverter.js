@@ -1,4 +1,4 @@
-// KylesChromeExtensions/misc_extension/content_scripts/messengerPhotoNavInverter.js
+// 414Extensions/misc_extension/content_scripts/messengerPhotoNavInverter.js
 (function () {
     'use strict';
 

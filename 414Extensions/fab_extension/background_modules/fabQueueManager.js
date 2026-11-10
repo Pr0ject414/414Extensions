@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/background_modules/fabQueueManager.js
+// 414Extensions/fab_extension/background_modules/fabQueueManager.js
 import * as FabConstants from './fabConstants.js';
 import * as FabState from './fabState.js';
 import { addOpenedItemToVerificationQueue } from './fabVerification.js';

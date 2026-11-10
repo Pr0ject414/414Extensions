@@ -1,4 +1,4 @@
-// KylesChromeExtensions/fab_extension/background_modules/fabConstants.js
+// 414Extensions/fab_extension/background_modules/fabConstants.js
 
 // Settings Keys for FAB features (from original background.js, used by popup/content scripts)
 export const FAB_FILTER_ENABLED_KEY = 'isFabFilterEnabled';

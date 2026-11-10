@@ -1,4 +1,4 @@
-// KylesChromeExtensions/misc_extension/content_scripts/googleImagesSaveHider.js
+// 414Extensions/misc_extension/content_scripts/googleImagesSaveHider.js
 (function () {
     'use strict';
 

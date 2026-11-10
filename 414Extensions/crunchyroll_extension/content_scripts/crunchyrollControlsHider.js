@@ -1,4 +1,4 @@
-// KylesChromeExtensions/crunchyroll_extension/content_scripts/crunchyrollControlsHider.js
+// 414Extensions/crunchyroll_extension/content_scripts/crunchyrollControlsHider.js
 (function() {
     'use strict';
 

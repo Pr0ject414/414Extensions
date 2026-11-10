@@ -1,4 +1,4 @@
-// KylesChromeExtensions/x_extension/xBackground.js
+// 414Extensions/x_extension/xBackground.js
 import * as AppState from '../shared_modules/appState.js';
 import { XLocationApiClient } from './xLocationApi.js';
 import { locationCache } from './xLocationCache.js';

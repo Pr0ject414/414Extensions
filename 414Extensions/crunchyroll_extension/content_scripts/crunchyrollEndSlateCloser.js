@@ -1,4 +1,4 @@
-// KylesChromeExtensions/crunchyroll_extension/content_scripts/crunchyrollEndSlateCloser.js
+// 414Extensions/crunchyroll_extension/content_scripts/crunchyrollEndSlateCloser.js
 (function() {
     'use strict';
 
