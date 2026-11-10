@@ -1,4 +1,4 @@
-# 414 Extensions (Kyle's Chrome Extensions & Mobile Suite)
+# 414 Extensions
 
 [![Manifest V3](https://img.shields.io/badge/Chrome%20Extension-Manifest%20V3-blue.svg)](https://developer.chrome.com/docs/extensions/mv3/)
 [![Version: 1.7](https://img.shields.io/badge/Version-1.7-green.svg)](414Extensions/manifest.json)
