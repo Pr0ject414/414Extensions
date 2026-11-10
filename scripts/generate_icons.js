@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import zlib from 'zlib';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Minimal pure Node.js PNG encoder
 function crc32(buf) {
@@ -147,7 +151,7 @@ function render414Icon(size) {
   return encodePNG(size, size, buf);
 }
 
-const iconsDir = path.resolve('d:/Dev/414Extenstions/414Extensions/icons');
+const iconsDir = path.resolve(__dirname, '../414Extensions/icons');
 if (!fs.existsSync(iconsDir)) fs.mkdirSync(iconsDir, { recursive: true });
 
 for (const s of [16, 32, 48, 128]) {

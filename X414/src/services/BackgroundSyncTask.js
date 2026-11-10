@@ -1,4 +1,4 @@
-// D:\Dev\X414\src\services\BackgroundSyncTask.js
+// X414/src/services/BackgroundSyncTask.js
 // Android Pixel Background Nostr Sync & Local Push Notifications for Forced Posts (⚡), Friend Invites & Regular X Notifications
 import '../bridge/cryptoPolyfill.js';
 

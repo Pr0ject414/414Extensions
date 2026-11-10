@@ -1,10 +1,18 @@
-# D:\Dev\X414\launch-pixel-sim.ps1
+# X414/launch-pixel-sim.ps1
 # Launches the visible Pixel_9_X414 Android 15 Emulator, installs x414-pixel-release.apk, and opens X414
 param(
     [switch]$WipeData
 )
 
-$sdk = "C:\Users\beesl\AppData\Local\Android\Sdk"
+$sdk = if ($env:ANDROID_HOME -and (Test-Path $env:ANDROID_HOME)) {
+    $env:ANDROID_HOME
+} elseif ($env:ANDROID_SDK_ROOT -and (Test-Path $env:ANDROID_SDK_ROOT)) {
+    $env:ANDROID_SDK_ROOT
+} elseif ($env:LOCALAPPDATA -and (Test-Path (Join-Path $env:LOCALAPPDATA "Android\Sdk"))) {
+    Join-Path $env:LOCALAPPDATA "Android\Sdk"
+} else {
+    Join-Path $env:USERPROFILE "AppData\Local\Android\Sdk"
+}
 $adb = "$sdk\platform-tools\adb.exe"
 $emulator = "$sdk\emulator\emulator.exe"
 $avdName = "Pixel_9_X414"

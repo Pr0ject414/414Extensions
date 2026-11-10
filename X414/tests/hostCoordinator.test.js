@@ -1,4 +1,4 @@
-// D:\Dev\X414\tests\hostCoordinator.test.js
+// X414/tests/hostCoordinator.test.js
 import { jest } from '@jest/globals';
 import { XHostCoordinator, XHostStorageAdapter } from '../src/bridge/XHostCoordinator.js';
 import { XFriendsSyncManager } from '../src/shared/xFriendsSync.js';

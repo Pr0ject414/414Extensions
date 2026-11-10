@@ -1,4 +1,4 @@
-// D:\Dev\414Extenstions\X414\scripts\sync-from-desktop.js
+// X414/scripts/sync-from-desktop.js
 // Single-Source-of-Truth Sync & WebView Bundle Builder for X414 (Android Pixel)
 const fs = require('fs');
 const path = require('path');

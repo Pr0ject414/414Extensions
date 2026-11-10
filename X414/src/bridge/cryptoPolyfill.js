@@ -1,4 +1,4 @@
-// D:\Dev\X414\src\bridge\cryptoPolyfill.js
+// X414/src/bridge/cryptoPolyfill.js
 // Provides WebCrypto (getRandomValues + subtle SHA-256 & AES-256-GCM) on Android Hermes / React Native
 import { sha256 } from '@noble/hashes/sha256';
 import { gcm } from '@noble/ciphers/aes';

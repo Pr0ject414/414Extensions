@@ -1,4 +1,4 @@
-// D:\Dev\X414\src\bridge\XHostCoordinator.js
+// X414/src/bridge/XHostCoordinator.js
 // Native Host Coordinator for X414 on Android Pixel
 // Bridges WebView runtime messages, AsyncStorage, Nostr Friends Sync, Location Cache/API, and Video Downloads
 import './cryptoPolyfill.js';

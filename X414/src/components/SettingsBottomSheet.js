@@ -1,4 +1,4 @@
-// D:\Dev\X414\src\components\SettingsBottomSheet.js
+// X414/src/components/SettingsBottomSheet.js
 // Slide-up Native Dark-Mode Settings & Friends Sync Bottom Sheet for Google Pixel
 import React, { useState, useEffect, useMemo } from 'react';
 import {

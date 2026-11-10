@@ -1,4 +1,4 @@
-// D:\Dev\X414\tests\backgroundNotifications.test.js
+// X414/tests/backgroundNotifications.test.js
 import { jest } from '@jest/globals';
 import {
     buildNotificationsFromSyncDiff,
