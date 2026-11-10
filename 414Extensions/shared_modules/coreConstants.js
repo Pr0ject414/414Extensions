@@ -41,6 +41,7 @@ export const CRUNCHYROLL_HIDE_CONTROLS_ON_SPEED_KEY = 'isCrunchyrollHideControls
 export const MISC_MODULE_ENABLED_KEY = 'isMiscModuleEnabled';
 export const GOOGLE_IMAGES_HIDE_SAVE_KEY = 'isGoogleImagesHideSaveEnabled';
 export const GEMINI_MARKDOWN_EXPORT_KEY = 'isGeminiMarkdownExportEnabled';
+export const MESSENGER_INVERT_PHOTO_NAV_KEY = 'isMessengerInvertPhotoNavEnabled';
 
 // Global rate limiting
 export const RATE_LIMIT_COOL_DOWN_UNTIL_KEY = 'rateLimitCoolDownUntil';

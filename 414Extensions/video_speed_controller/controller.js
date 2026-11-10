@@ -247,6 +247,8 @@ function deinit() {
     activeHosts.clear();
     activeClickedVideo = null;
     spaceTargetVideo = null;
+    spaceBridgedWindows = null;
+    userClickedOutsideVideo = false;
 
     // Clear Dataset attached flag so we can re-attach later
     attachedVideos.forEach(v => {
@@ -275,7 +277,10 @@ function observeVideos(initialSpeed) {
     });
   });
 
-  pageObserver.observe(document.body, { childList: true, subtree: true });
+  const observeTarget = document.body || document.documentElement;
+  if (observeTarget) {
+      pageObserver.observe(observeTarget, { childList: true, subtree: true });
+  }
   // Initial scan
   const selector = currentConfig.options.audio ? 'video, audio' : 'video';
   document.querySelectorAll(selector).forEach(v => attachController(v, initialSpeed));
@@ -638,8 +643,24 @@ function attachController(video, initialSpeed) {
 
     video.addEventListener('ratechange', handleRateChange);
 
+    // Prevent site scripts from pausing the video mid-hold while Spacebar speed override is active
+    let lastOverrideResumeMs = 0;
+    video.addEventListener('pause', () => {
+        const overrideState = videoOverrideState.get(video);
+        if (overrideState && overrideState.active && overrideTriggeredByKey && !video.ended && video.isConnected) {
+            const now = Date.now();
+            if (now - lastOverrideResumeMs > 30) {
+                lastOverrideResumeMs = now;
+                video.play().catch(() => {});
+            }
+        }
+    });
+
     // Append Host
-    document.body.appendChild(host);
+    const initialHostParent = document.body || document.documentElement;
+    if (initialHostParent) {
+        initialHostParent.appendChild(host);
+    }
 
     let wasFS = false;
     let lastAnotherVideoFS = false;
@@ -736,8 +757,8 @@ function attachController(video, initialSpeed) {
         }
 
         // 1. Fullscreen Handling
-        const targetParent = isRelatedToFS ? fsElement : document.body;
-        if (host.parentNode !== targetParent) {
+        const targetParent = isRelatedToFS ? fsElement : (document.body || document.documentElement);
+        if (targetParent && host.parentNode !== targetParent) {
             targetParent.appendChild(host);
         }
 
@@ -931,13 +952,29 @@ let spaceKeyPending = false;
 let spaceTimer = null;
 let activeClickedVideo = null;
 let spaceTargetVideo = null;
+let spaceBridgedWindows = null;
+let userClickedOutsideVideo = false;
+let lastFocusWasKeyboard = false;
+
+const NON_TEXT_INPUT_TYPES = new Set([
+    'range', 'button', 'submit', 'reset', 'checkbox', 'radio', 'color', 'file', 'image', 'hidden'
+]);
+
+function isTextInputElement(el) {
+    if (!el || !el.tagName || el.tagName.toUpperCase() !== 'INPUT') return false;
+    const rawType = (typeof el.getAttribute === 'function' && el.getAttribute('type')) || el.type || 'text';
+    return !NON_TEXT_INPUT_TYPES.has(String(rawType).toLowerCase());
+}
 
 function isElementEditable(el) {
     if (!el || typeof el !== 'object') return false;
     if (el.nodeType && el.nodeType !== 1) return false;
 
     const tagName = el.tagName ? el.tagName.toUpperCase() : '';
-    if (tagName === 'INPUT' || tagName === 'TEXTAREA' || tagName === 'SELECT') {
+    if (tagName === 'INPUT') {
+        return isTextInputElement(el);
+    }
+    if (tagName === 'TEXTAREA' || tagName === 'SELECT') {
         return true;
     }
 
@@ -958,9 +995,11 @@ function isElementEditable(el) {
 
     if (typeof el.closest === 'function') {
         const editableAncestor = el.closest(
-            'input, textarea, select, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], [role="textbox"], [role="searchbox"], [role="combobox"]'
+            'textarea, select, [contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"], [role="textbox"], [role="searchbox"], [role="combobox"]'
         );
         if (editableAncestor) return true;
+        const inputAncestor = el.closest('input');
+        if (inputAncestor && isTextInputElement(inputAncestor)) return true;
     }
 
     return false;
@@ -995,16 +1034,98 @@ function isTypingOrEditing(e) {
     return false;
 }
 
-function isInteractiveControlFocused(e) {
+function isElementHiddenOrInert(el) {
+    let curr = el;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+        if (curr.nodeType === 1) {
+            if (
+                curr.hasAttribute('hidden') ||
+                curr.hasAttribute('inert') ||
+                curr.getAttribute('aria-hidden') === 'true' ||
+                curr.getAttribute('data-overlay-visible') === 'false' ||
+                (curr.classList && curr.classList.contains('cr-speed-controls-hidden'))
+            ) {
+                return true;
+            }
+            if (typeof window.getComputedStyle === 'function') {
+                const style = window.getComputedStyle(curr);
+                if (
+                    style.display === 'none' ||
+                    style.visibility === 'hidden' ||
+                    style.visibility === 'collapse' ||
+                    style.opacity === '0' ||
+                    style.pointerEvents === 'none'
+                ) {
+                    return true;
+                }
+            }
+        }
+        curr = curr.parentElement || (curr.parentNode && curr.parentNode.host);
+    }
+    return false;
+}
+
+function isInteractiveControlFocused(e, targetVideo = null) {
     const el = (e && e.target && e.target.nodeType === 1) ? e.target : document.activeElement;
     if (!el || typeof el.closest !== 'function') return false;
     const interactive = el.closest(
-        'button, a[href], summary, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"], [role="tab"]'
+        'button, summary, ' +
+        'input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], input[type="radio"], ' +
+        '[role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"], [role="tab"]'
     );
     if (!interactive) return false;
     const rect = typeof interactive.getBoundingClientRect === 'function' ? interactive.getBoundingClientRect() : { width: 0, height: 0 };
     if (rect.width > 300 && rect.height > 300) return false; // Large video surface overlay
+
+    // Auto-hidden player overlays (e.g. Crunchyroll opacity: 0; pointer-events: none;) retain focus on buttons
+    // after clicks; never let invisible controls block Spacebar playback/speed control.
+    if (isElementHiddenOrInert(interactive)) return false;
+
+    // Play/pause buttons share the exact Tap=Toggle / Hold=Speedup semantics of VSC's Spacebar handler
+    if (interactive.getAttribute && interactive.getAttribute('data-testid') === 'play-pause-button') {
+        return false;
+    }
+
+    // Always yield to open popup menus / listboxes and explicit toggle inputs
+    if (
+        interactive.getAttribute('aria-expanded') === 'true' ||
+        interactive.matches('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"], [role="switch"]') ||
+        interactive.closest('[role="menu"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="listbox"], [role="option"]')
+    ) {
+        return true;
+    }
+
+    // If focus landed on a button via mouse click (rather than Tab keyboard navigation),
+    // keep Spacebar mapped to video playback & hold-to-speed-up instead of re-clicking buttons.
+    if (!lastFocusWasKeyboard) {
+        if (isCrunchyrollHost()) {
+            return false;
+        }
+        if (interactive.closest(
+            '[data-testid="bottom-controls-autohide"], [data-testid="top-controls-autohide"], ' +
+            '[data-testid="middle-controls-autohide"], [data-testid="player-controls-root"], ' +
+            '.vilos-controls-container, .ytp-chrome-bottom'
+        )) {
+            return false;
+        }
+        if (targetVideo && targetVideo.nodeName === 'VIDEO' && typeof targetVideo.getBoundingClientRect === 'function') {
+            const vRect = targetVideo.getBoundingClientRect();
+            if (vRect.width > 0 && vRect.height > 0 && rect.width > 0 && rect.height > 0) {
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                if (cx >= vRect.left && cx <= vRect.right && cy >= vRect.top && cy <= vRect.bottom) {
+                    return false;
+                }
+            }
+        }
+    }
+
     return true;
+}
+
+function isCrunchyrollHost() {
+    const host = String((window.location && window.location.hostname) || '').toLowerCase();
+    return host === 'crunchyroll.com' || host.endsWith('.crunchyroll.com');
 }
 
 function getSpaceTargetVideo() {
@@ -1027,26 +1148,225 @@ function getSpaceTargetVideo() {
         }
     }
 
+    // 3. On Crunchyroll, always target the visible player video even when unfocused / clicked outside
+    if (isCrunchyrollHost()) {
+        const playingVisible = videos.find(v => v && v.isConnected && v.nodeName === 'VIDEO' && !v.paused && isVideoVisibleOnScreen(v));
+        if (playingVisible) return playingVisible;
+        const anyVisible = videos.find(v => v && v.isConnected && v.nodeName === 'VIDEO' && isVideoVisibleOnScreen(v));
+        if (anyVisible) return anyVisible;
+    }
+
+    // 4. Maximized player video (e.g. full-viewport player iframe) unless user explicitly clicked outside
+    if (!userClickedOutsideVideo) {
+        const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0;
+        const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+
+        if (vw > 0 && vh > 0) {
+            const maximizedVideo = videos.find(v => {
+                if (!v || !v.isConnected || v.nodeName !== 'VIDEO') return false;
+                const rect = v.getBoundingClientRect();
+                return rect.width >= vw * 0.85 && rect.height >= vh * 0.85;
+            });
+            if (maximizedVideo) return maximizedVideo;
+        }
+    }
+
     return null;
 }
 
+function getCrunchyrollBridgeWindows() {
+    if (!isCrunchyrollHost()) {
+        return null;
+    }
+
+    const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0;
+    const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+
+    // 1. Prefer any visible player iframe in the DOM (works even if outer page also has hidden preview <video>s
+    // or if the user clicked outside the player so the video/iframe is not focused).
+    const fsElement = document.fullscreenElement || document.webkitFullscreenElement;
+    const iframes = document.querySelectorAll('iframe');
+    const matched = [];
+    for (let i = 0; i < iframes.length; i++) {
+        const frame = iframes[i];
+        if (!frame.contentWindow) continue;
+        if (fsElement && (fsElement === frame || fsElement.contains(frame))) {
+            return [frame.contentWindow];
+        }
+        const rect = frame.getBoundingClientRect();
+        const inViewport = (
+            rect.width >= 200 &&
+            rect.height >= 120 &&
+            (vh <= 0 || (rect.bottom > 40 && rect.top < vh - 40)) &&
+            (vw <= 0 || (rect.right > 40 && rect.left < vw - 40))
+        );
+        if (inViewport && !isElementHiddenOrInert(frame)) {
+            matched.push(frame.contentWindow);
+        }
+    }
+    if (matched.length > 0) {
+        return matched;
+    }
+
+    // 2. Fallback for Shadow-DOM-wrapped player iframes on Crunchyroll watch pages
+    const pathname = String((window.location && window.location.pathname) || '');
+    if (pathname.includes('/watch') && window.frames && window.frames.length > 0) {
+        if (window.scrollY < (vh || 800) * 0.85) {
+            const wins = [];
+            for (let i = 0; i < window.frames.length; i++) {
+                if (window.frames[i]) wins.push(window.frames[i]);
+            }
+            if (wins.length > 0) return wins;
+        }
+    }
+
+    return null;
+}
+
+function blurFocusedPlayerControl() {
+    const active = document.activeElement;
+    if (!active || !active.tagName || typeof active.blur !== 'function') return;
+    const tag = active.tagName.toUpperCase();
+    if (tag === 'BUTTON' || (tag === 'INPUT' && !isTextInputElement(active))) {
+        active.blur();
+    }
+}
+
+function startSpacePress(target, repeat) {
+    if (overrideTriggeredByKey) return;
+
+    // If we are pending (waiting to decide Tap vs Hold) and getting repeats, confirm Hold now
+    if (spaceKeyPending && repeat) {
+        clearTimeout(spaceTimer);
+        spaceKeyPending = false;
+        overrideTriggeredByKey = true;
+        blurFocusedPlayerControl();
+        target.play().catch(() => {}); // Force play
+        triggerOverride(target, true);
+        return;
+    }
+
+    // New Press
+    if (!spaceKeyPending) {
+        spaceKeyPending = true;
+        spaceTargetVideo = target;
+        // 200ms threshold for Space (quicker than mouse)
+        spaceTimer = setTimeout(() => {
+            spaceKeyPending = false;
+            overrideTriggeredByKey = true;
+            blurFocusedPlayerControl();
+            if (spaceTargetVideo) {
+                spaceTargetVideo.play().catch(() => {});
+                triggerOverride(spaceTargetVideo, true);
+            }
+        }, 200);
+    }
+}
+
+function endSpacePress() {
+    if (!spaceKeyPending && !overrideTriggeredByKey) return false;
+
+    const target = spaceTargetVideo || getSpaceTargetVideo();
+    spaceTargetVideo = null;
+
+    if (spaceKeyPending) {
+        // Released before timer -> TAP
+        clearTimeout(spaceTimer);
+        spaceKeyPending = false;
+
+        // Toggle Play/Pause only on the target video
+        if (target) {
+            if (!target.paused) {
+                target.pause();
+            } else {
+                target.play().catch(() => {});
+            }
+        }
+    } else if (overrideTriggeredByKey) {
+        // Released after Hold -> Stop Override
+        overrideTriggeredByKey = false;
+        const videos = Array.from(attachedVideos);
+        videos.forEach(v => triggerOverride(v, false));
+    }
+    return true;
+}
+
+function postToBridgeWindows(windows, payload) {
+    if (!windows) return;
+    for (let i = 0; i < windows.length; i++) {
+        try {
+            if (windows[i] && typeof windows[i].postMessage === 'function') {
+                windows[i].postMessage(payload, '*');
+            }
+        } catch (err) {}
+    }
+}
+
+function cancelSpacePress() {
+    if (spaceKeyPending) {
+        clearTimeout(spaceTimer);
+        spaceKeyPending = false;
+    }
+    if (overrideTriggeredByKey) {
+        overrideTriggeredByKey = false;
+        const videos = Array.from(attachedVideos);
+        videos.forEach(v => triggerOverride(v, false));
+    }
+    spaceTargetVideo = null;
+    if (spaceBridgedWindows) {
+        postToBridgeWindows(spaceBridgedWindows, { source: '414-vsc-space-bridge', action: 'cancel' });
+        spaceBridgedWindows = null;
+    }
+}
+
+window.addEventListener('message', (e) => {
+    if (isGloballyDisabled || !isInitialized) return;
+    const data = e && e.data;
+    if (!data || data.source !== '414-vsc-space-bridge') return;
+
+    if (data.action === 'keydown') {
+        let target = spaceTargetVideo || getSpaceTargetVideo();
+        if (!target) {
+            const videos = Array.from(attachedVideos);
+            target = videos.find(v => v && v.isConnected && v.nodeName === 'VIDEO' && !v.paused) ||
+                     videos.find(v => v && v.isConnected && v.nodeName === 'VIDEO');
+        }
+        if (target) startSpacePress(target, !!data.repeat);
+    } else if (data.action === 'keyup') {
+        endSpacePress();
+    } else if (data.action === 'cancel') {
+        cancelSpacePress();
+    }
+});
+
+window.addEventListener('blur', (e) => {
+    if (e && e.target !== window) return;
+    cancelSpacePress();
+});
+
 document.addEventListener('mousedown', (e) => {
+    lastFocusWasKeyboard = false;
     if (isGloballyDisabled || !isInitialized) return;
 
     // 0. Track whether the user clicked into a video or clicked elsewhere (e.g. text input or page background)
     if (isTypingOrEditing(e)) {
         activeClickedVideo = null;
+        userClickedOutsideVideo = true;
         return;
     }
 
     const hostEl = (e.target && typeof e.target.closest === 'function') ? e.target.closest('.vsc-controller-host') : null;
     if (hostEl) {
-        if (hostEl._vscVideo) activeClickedVideo = hostEl._vscVideo;
+        if (hostEl._vscVideo) {
+            activeClickedVideo = hostEl._vscVideo;
+            userClickedOutsideVideo = false;
+        }
         return;
     }
 
     if (attachedVideos.size === 0) {
         activeClickedVideo = null;
+        userClickedOutsideVideo = true;
         return;
     }
 
@@ -1064,6 +1384,7 @@ document.addEventListener('mousedown', (e) => {
     });
 
     activeClickedVideo = targetVideo || null;
+    userClickedOutsideVideo = !targetVideo;
 
     // 1. Basic Filters for Hold-to-Override: Ignore non-left clicks, non-video clicks, interactive controls, or links
     if (e.button !== 0 || !targetVideo) return;
@@ -1157,7 +1478,7 @@ document.addEventListener('mousedown', (e) => {
     document.addEventListener('mousemove', onMouseMoveCheck, true); // Dead Man's Switch for drags
 }, true); // Capture
 
-document.addEventListener('click', (e) => {
+window.addEventListener('click', (e) => {
     if (shouldSuppressClick) {
         e.stopImmediatePropagation();
         e.preventDefault();
@@ -1166,104 +1487,86 @@ document.addEventListener('click', (e) => {
     }
 }, true);
 
-document.addEventListener('keydown', (e) => {
+// Attach Spacebar handlers on window in capture phase (at document_start) so we run BEFORE
+// site-level window/document capture listeners (such as Crunchyroll's rapid play/pause toggle on repeat).
+window.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab' || (typeof e.key === 'string' && e.key.startsWith('Arrow'))) {
+        lastFocusWasKeyboard = true;
+    }
+
     if (isGloballyDisabled || !isInitialized) return;
 
     // Space bar check
     if (e.code === 'Space') {
-        if (isTypingOrEditing(e) || isInteractiveControlFocused(e)) {
-            if (spaceKeyPending) {
-                clearTimeout(spaceTimer);
-                spaceKeyPending = false;
-                spaceTargetVideo = null;
-            }
+        if (isTypingOrEditing(e)) {
+            cancelSpacePress();
             return;
         }
 
         const target = spaceTargetVideo || getSpaceTargetVideo();
-        if (!target) return;
+        const bridgeWins = !target ? (spaceBridgedWindows || getCrunchyrollBridgeWindows()) : null;
 
-        // HIJACK: Stop site from seeing Space only when controlling an explicitly clicked or fullscreen video
+        if (!target && !bridgeWins) return;
+
+        if (isInteractiveControlFocused(e, target)) {
+            cancelSpacePress();
+            return;
+        }
+
+        // HIJACK: Stop site from seeing Space when controlling the target video or bridged player iframe
         e.stopImmediatePropagation();
         e.preventDefault();
 
-        // If already overriding, ignore active holds (but handle repeats if we were pending)
-        if (overrideTriggeredByKey) return;
-
-        // If we are pending (waiting to decide Tap vs Hold) and getting repeats, confirm Hold now
-        if (spaceKeyPending && e.repeat) {
-             clearTimeout(spaceTimer);
-             spaceKeyPending = false;
-             overrideTriggeredByKey = true;
-             target.play().catch(()=>{}); // Force play
-             triggerOverride(target, true);
-             return;
+        if (bridgeWins) {
+            spaceBridgedWindows = bridgeWins;
+            blurFocusedPlayerControl();
+            postToBridgeWindows(bridgeWins, {
+                source: '414-vsc-space-bridge',
+                action: 'keydown',
+                repeat: !!e.repeat
+            });
+            return;
         }
 
-        // New Press
-        if (!spaceKeyPending) {
-            spaceKeyPending = true;
-            spaceTargetVideo = target;
-            // 200ms threshold for Space (quicker than mouse)
-            spaceTimer = setTimeout(() => {
-                spaceKeyPending = false;
-                overrideTriggeredByKey = true;
-                if (spaceTargetVideo) {
-                    spaceTargetVideo.play().catch(()=>{});
-                    triggerOverride(spaceTargetVideo, true);
-                }
-            }, 200);
-        }
+        startSpacePress(target, !!e.repeat);
     }
 }, true); // Capture
 
-document.addEventListener('keyup', (e) => {
+window.addEventListener('keypress', (e) => {
+    if (isGloballyDisabled || !isInitialized) return;
+    if (e.code === 'Space' && (spaceKeyPending || overrideTriggeredByKey || spaceBridgedWindows)) {
+        e.stopImmediatePropagation();
+        e.preventDefault();
+    }
+}, true); // Capture
+
+window.addEventListener('keyup', (e) => {
     if (isGloballyDisabled || !isInitialized) return;
 
     if (e.code === 'Space') {
-         if (isTypingOrEditing(e)) {
-             if (spaceKeyPending) {
-                 clearTimeout(spaceTimer);
-                 spaceKeyPending = false;
-             }
-             if (overrideTriggeredByKey) {
-                 overrideTriggeredByKey = false;
-                 const videos = Array.from(attachedVideos);
-                 videos.forEach(v => triggerOverride(v, false));
-             }
-             spaceTargetVideo = null;
-             return;
-         }
+        if (isTypingOrEditing(e)) {
+            cancelSpacePress();
+            return;
+        }
 
-         if (!spaceKeyPending && !overrideTriggeredByKey) return;
+        if (spaceBridgedWindows) {
+            e.stopImmediatePropagation();
+            e.preventDefault();
+            postToBridgeWindows(spaceBridgedWindows, {
+                source: '414-vsc-space-bridge',
+                action: 'keyup'
+            });
+            spaceBridgedWindows = null;
+            return;
+        }
 
-         // Stop propagation for Space only when we managed the press
-         e.stopImmediatePropagation();
-         e.preventDefault();
+        if (!spaceKeyPending && !overrideTriggeredByKey) return;
 
-         const target = spaceTargetVideo || getSpaceTargetVideo();
-         spaceTargetVideo = null;
+        // Stop propagation for Space only when we managed the press
+        e.stopImmediatePropagation();
+        e.preventDefault();
 
-         if (spaceKeyPending) {
-             // Released before timer -> TAP
-             clearTimeout(spaceTimer);
-             spaceKeyPending = false;
-
-             // Toggle Play/Pause only on the target video that was clicked into (or fullscreen)
-             if (target) {
-                 if (!target.paused) {
-                     target.pause();
-                 } else {
-                     target.play().catch(()=>{});
-                 }
-             }
-         }
-         else if (overrideTriggeredByKey) {
-             // Released after Hold -> Stop Override
-             overrideTriggeredByKey = false;
-             const videos = Array.from(attachedVideos);
-             videos.forEach(v => triggerOverride(v, false));
-         }
+        endSpacePress();
     }
 }, true); // Capture
 
@@ -1375,7 +1678,7 @@ function handleKeyDown(e) {
 
     if (shortcut.id === 'toggle') {
         activeHosts.forEach(h => h.classList.toggle('vsc-hidden'));
-        document.body.classList.toggle('vsc-global-hidden');
+        if (document.body) document.body.classList.toggle('vsc-global-hidden');
     }
     else if (shortcut.id === 'decrease') {
         updateSpeed(target, -shortcut.value);
@@ -1410,7 +1713,10 @@ if (typeof window !== 'undefined') {
         isElementVisibleOnScreen,
         isVideoVisibleOnScreen,
         isTypingOrEditing,
-        getSpaceTargetVideo
+        isInteractiveControlFocused,
+        getSpaceTargetVideo,
+        isMouseOverrideActive: () => overrideTriggeredByMouse,
+        isKeyOverrideActive: () => overrideTriggeredByKey
     };
 }
 

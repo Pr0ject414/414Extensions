@@ -45,7 +45,7 @@
       ]
     },
     {
-      "run_at": "document_idle",
+      "run_at": "document_start",
       "js": ["video_speed_controller/controller.js"],
       "css": ["video_speed_controller/controller.css"],
       "matches": [
@@ -138,7 +138,8 @@
       "js": [
         "crunchyroll_extension/content_scripts/crunchyrollEndSlateCloser.js",
         "crunchyroll_extension/content_scripts/crunchyrollControlsHider.js"
-      ]
+      ],
+      "all_frames": true
     },
     {
       "run_at": "document_idle",
@@ -152,6 +153,19 @@
       "js": [
         "misc_extension/content_scripts/googleImagesSaveHider.js",
         "misc_extension/content_scripts/geminiMarkdownExporter.js"
+      ]
+    },
+    {
+      "run_at": "document_idle",
+      "matches": [
+        "*://*.messenger.com/*",
+        "*://*.facebook.com/*"
+      ],
+      "css": [
+        "misc_extension/content_scripts/messengerPhotoNavInverter.css"
+      ],
+      "js": [
+        "misc_extension/content_scripts/messengerPhotoNavInverter.js"
       ]
     }
   ],

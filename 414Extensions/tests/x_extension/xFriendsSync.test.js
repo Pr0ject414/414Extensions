@@ -639,5 +639,166 @@ describe('XFriendsSyncManager', () => {
         expect(rawWs.onerror).toBeNull();
         expect(rawWs.onclose).toBeNull();
     });
+
+    test('should retry transient 502s via NIP-11 HTTP preflight before opening WebSocket, suppress WebSocket creation on persistent 502, and persist cooldown across service worker restarts', async () => {
+        let primalHttpCalls = 0;
+        let primalWsCalls = 0;
+        let nosWsCalls = 0;
+
+        // Scenario A: relay.primal.net returns transient 502 once, then recovers with 200 OK on retry
+        const transientManager = new XFriendsSyncManager({
+            relays: ['wss://relay.primal.net'],
+            enableNip11Preflight: true,
+            preflightMaxRetries: 2,
+            preflightRetryDelayMs: 5,
+            batchMaxRetries: 0,
+            fetchFn: async (url) => {
+                if (url === 'https://relay.primal.net') {
+                    primalHttpCalls++;
+                    if (primalHttpCalls === 1) {
+                        return { ok: false, status: 502 };
+                    }
+                    return { ok: true, status: 200 };
+                }
+                return { ok: true, status: 200 };
+            },
+            webSocketFactory: () => {
+                primalWsCalls++;
+                return relayHub.createSocket();
+            }
+        });
+
+        await transientManager.setIdentity('alice@example.com', 'Alice');
+        expect(primalHttpCalls).toBe(2); // Initial 502 + 1 successful retry
+        expect(primalWsCalls).toBe(1);   // WebSocket only opened AFTER 502 cleared
+
+        // Scenario B: relay.primal.net stays down with 502 across all retries -> WebSocket NEVER opened (no chrome://extensions 502 error!)
+        storageMap.clear();
+        let persistentHttpCalls = 0;
+        let persistentPrimalWsCalls = 0;
+
+        const firstWorker = new XFriendsSyncManager({
+            relays: ['wss://relay.primal.net', 'wss://nos.lol'],
+            enableNip11Preflight: true,
+            preflightMaxRetries: 2,
+            preflightRetryDelayMs: 5,
+            fetchFn: async (url) => {
+                if (url === 'https://relay.primal.net') {
+                    persistentHttpCalls++;
+                    return { ok: false, status: 502 };
+                }
+                return { ok: true, status: 200 };
+            },
+            webSocketFactory: (url) => {
+                if (url === 'wss://relay.primal.net') persistentPrimalWsCalls++;
+                if (url === 'wss://nos.lol') nosWsCalls++;
+                return relayHub.createSocket();
+            }
+        });
+
+        await firstWorker.setIdentity('alice@example.com', 'Alice');
+        expect(persistentHttpCalls).toBe(3); // 1 initial + 2 retries
+        expect(persistentPrimalWsCalls).toBe(0); // Never called new WebSocket on 502 relay!
+        expect(nosWsCalls).toBe(1);
+        expect(firstWorker.relayCooldownUntil.get('wss://relay.primal.net')).toBeGreaterThan(Date.now());
+
+        // Simulate MV3 Service Worker termination and fresh wakeup using persisted chrome.storage.local state
+        let secondWorkerPrimalHttpCalls = 0;
+        const restartedWorker = new XFriendsSyncManager({
+            relays: ['wss://relay.primal.net', 'wss://nos.lol'],
+            enableNip11Preflight: true,
+            preflightMaxRetries: 2,
+            preflightRetryDelayMs: 5,
+            fetchFn: async (url) => {
+                if (url === 'https://relay.primal.net') {
+                    secondWorkerPrimalHttpCalls++;
+                    return { ok: false, status: 502 };
+                }
+                return { ok: true, status: 200 };
+            },
+            webSocketFactory: () => relayHub.createSocket()
+        });
+
+        await restartedWorker.syncWithRelays();
+        expect(secondWorkerPrimalHttpCalls).toBe(0); // Cooldown survived service worker restart!
+        expect(restartedWorker.relayFailureCounts.get('wss://relay.primal.net')).toBe(1);
+    });
+
+    test('should automatically retry batch when all relays fail transiently and preserve hasUnpublishedSeen when completely offline', async () => {
+        let attempts = 0;
+        const flakyManager = new XFriendsSyncManager({
+            relays: ['wss://flaky.relay'],
+            batchMaxRetries: 1,
+            batchRetryDelayMs: 5,
+            webSocketFactory: () => {
+                attempts++;
+                if (attempts === 1) {
+                    const deadWs = {
+                        readyState: 0,
+                        onopen: null,
+                        onmessage: null,
+                        onerror: null,
+                        onclose: null,
+                        send: jest.fn(),
+                        close() { deadWs.readyState = 3; }
+                    };
+                    setTimeout(() => {
+                        deadWs.readyState = 3;
+                        if (deadWs.onclose) deadWs.onclose();
+                    }, 2);
+                    return deadWs;
+                }
+                return relayHub.createSocket();
+            }
+        });
+
+        await flakyManager.init();
+        flakyManager.state.identity = {
+            email: 'alice@example.com',
+            displayName: 'Alice',
+            passphrase: '',
+            privKeyHex: '1'.repeat(64),
+            pubkeyHex: '2'.repeat(64),
+            seenFeedKeyHex: '3'.repeat(64),
+            identityCreatedAt: Date.now()
+        };
+        await flakyManager.markTweetsSeen(['1850000000000000999']);
+        const publishedOk = await flakyManager.publishMySeenSnapshot();
+
+        expect(publishedOk).toBe(true);
+        expect(attempts).toBe(2); // Failed attempt 1 -> retried attempt 2 and succeeded
+        expect(flakyManager.state.hasUnpublishedSeen).toBe(false);
+
+        // Now test total offline outage across all retries -> preserves hasUnpublishedSeen = true
+        const offlineManager = new XFriendsSyncManager({
+            relays: ['wss://offline.relay'],
+            batchMaxRetries: 1,
+            batchRetryDelayMs: 5,
+            webSocketFactory: () => {
+                const deadWs = {
+                    readyState: 0,
+                    onopen: null,
+                    onmessage: null,
+                    onerror: null,
+                    onclose: null,
+                    send: jest.fn(),
+                    close() { deadWs.readyState = 3; }
+                };
+                setTimeout(() => {
+                    deadWs.readyState = 3;
+                    if (deadWs.onclose) deadWs.onclose();
+                }, 2);
+                return deadWs;
+            }
+        });
+
+        await offlineManager.init();
+        offlineManager.state.identity = flakyManager.state.identity;
+        await offlineManager.markTweetsSeen(['1850000000000000888']);
+        const offlineResult = await offlineManager.publishMySeenSnapshot();
+
+        expect(offlineResult).toBe(false);
+        expect(offlineManager.state.hasUnpublishedSeen).toBe(true);
+    });
 });
 

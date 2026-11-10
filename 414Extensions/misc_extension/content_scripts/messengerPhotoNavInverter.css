@@ -1,0 +1,12 @@
+/* KylesChromeExtensions/misc_extension/content_scripts/messengerPhotoNavInverter.css */
+
+html.ext414-invert-messenger-photo-nav .ext414-messenger-photo-nav-row {
+    flex-direction: row-reverse !important;
+}
+
+html.ext414-invert-messenger-photo-nav .ext414-messenger-photo-nav-row [role="button"][aria-label="Previous photo"] svg,
+html.ext414-invert-messenger-photo-nav .ext414-messenger-photo-nav-row [role="button"][aria-label="Next photo"] svg,
+html.ext414-invert-messenger-photo-nav .ext414-messenger-photo-nav-row [role="button"][aria-label="Previous media"] svg,
+html.ext414-invert-messenger-photo-nav .ext414-messenger-photo-nav-row [role="button"][aria-label="Next media"] svg {
+    transform: scaleX(-1) !important;
+}

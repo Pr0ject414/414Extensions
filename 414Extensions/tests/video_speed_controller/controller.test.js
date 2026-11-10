@@ -433,6 +433,220 @@ describe('video_speed_controller/controller.js', () => {
             expect(video.play).toHaveBeenCalledTimes(1);
             expect(video.pause).toHaveBeenCalledTimes(1);
         });
+
+        it('prevents Crunchyroll from rapidly pausing/unpausing when holding Spacebar, even after clicking timeline slider or play/fullscreen buttons', () => {
+            jest.useFakeTimers();
+            try {
+                delete window.location;
+                window.location = { hostname: 'www.crunchyroll.com' };
+
+                // Video is playing at 1.0x
+                Object.defineProperty(video, 'paused', { value: false, configurable: true });
+                video.playbackRate = 1.0;
+
+                // Simulate Crunchyroll's player controls inside bottom-controls-autohide
+                const bottomControls = document.createElement('div');
+                bottomControls.setAttribute('data-testid', 'bottom-controls-autohide');
+                bottomControls.setAttribute('data-overlay-visible', 'false');
+                bottomControls.style.opacity = '0';
+                bottomControls.style.pointerEvents = 'none';
+
+                const timelineSlider = document.createElement('input');
+                timelineSlider.type = 'range';
+                timelineSlider.className = 'timeline-slider';
+
+                const playPauseBtn = document.createElement('button');
+                playPauseBtn.type = 'button';
+                playPauseBtn.setAttribute('data-testid', 'play-pause-button');
+                playPauseBtn.getBoundingClientRect = () => ({
+                    top: 200, bottom: 244, left: 60, right: 104, width: 44, height: 44
+                });
+
+                bottomControls.appendChild(timelineSlider);
+                bottomControls.appendChild(playPauseBtn);
+                document.body.appendChild(bottomControls);
+
+                // Simulate Crunchyroll's own document capture listener that toggles play/pause on every Space keydown
+                const crunchyrollKeyHandler = jest.fn((e) => {
+                    if (e.code === 'Space') {
+                        if (video.paused) video.play();
+                        else video.pause();
+                    }
+                });
+                document.addEventListener('keydown', crunchyrollKeyHandler, true);
+
+                try {
+                    // 1. User clicks timeline slider (input[type="range"]) -> must NOT be treated as typing!
+                    timelineSlider.focus();
+                    timelineSlider.dispatchEvent(new MouseEvent('mousedown', {
+                        bubbles: true,
+                        cancelable: true,
+                        button: 0,
+                        clientX: 120,
+                        clientY: 220
+                    }));
+                    timelineSlider.dispatchEvent(new MouseEvent('mouseup', {
+                        bubbles: true,
+                        cancelable: true,
+                        button: 0,
+                        clientX: 120,
+                        clientY: 220
+                    }));
+
+                    expect(VSC.isTypingOrEditing({ target: timelineSlider })).toBe(false);
+
+                    // 2. Also test when play-pause-button retains focus
+                    playPauseBtn.focus();
+
+                    // Hold Spacebar: initial keydown + OS key repeats
+                    playPauseBtn.dispatchEvent(new KeyboardEvent('keydown', {
+                        code: 'Space',
+                        key: ' ',
+                        repeat: false,
+                        bubbles: true,
+                        cancelable: true
+                    }));
+
+                    jest.advanceTimersByTime(210);
+                    expect(video.playbackRate).toBe(2.0);
+                    expect(VSC.isKeyOverrideActive()).toBe(true);
+
+                    // Rapid OS repeats while holding Spacebar
+                    for (let i = 0; i < 6; i++) {
+                        document.dispatchEvent(new KeyboardEvent('keydown', {
+                            code: 'Space',
+                            key: ' ',
+                            repeat: true,
+                            bubbles: true,
+                            cancelable: true
+                        }));
+                    }
+
+                    // Crunchyroll's handler must NEVER fire, video must NEVER pause, and speed stays 2.0x
+                    expect(crunchyrollKeyHandler).not.toHaveBeenCalled();
+                    expect(video.pause).not.toHaveBeenCalled();
+                    expect(video.playbackRate).toBe(2.0);
+
+                    // Release Spacebar -> restores to 1.0x cleanly without pausing
+                    document.dispatchEvent(new KeyboardEvent('keyup', {
+                        code: 'Space',
+                        key: ' ',
+                        bubbles: true,
+                        cancelable: true
+                    }));
+
+                    expect(video.playbackRate).toBe(1.0);
+                    expect(video.pause).not.toHaveBeenCalled();
+                    expect(VSC.isKeyOverrideActive()).toBe(false);
+                } finally {
+                    document.removeEventListener('keydown', crunchyrollKeyHandler, true);
+                    delete window.location;
+                    window.location = { hostname: 'newsite.com' };
+                }
+            } finally {
+                jest.useRealTimers();
+            }
+        });
+
+        it('controls Crunchyroll video via Spacebar even when the video is NOT focused (clicked outside or outer page with player iframe)', () => {
+            jest.useFakeTimers();
+            try {
+                delete window.location;
+                window.location = { hostname: 'www.crunchyroll.com', pathname: '/watch/G12345' };
+
+                // Part A: Same-frame visible video when user clicks outside on the page (unfocusing video)
+                Object.defineProperty(video, 'paused', { value: false, configurable: true });
+                video.playbackRate = 1.0;
+
+                const outsideWatchlistBtn = document.createElement('button');
+                outsideWatchlistBtn.type = 'button';
+                outsideWatchlistBtn.getBoundingClientRect = () => ({
+                    top: 400, bottom: 440, left: 50, right: 180, width: 130, height: 40
+                });
+                document.body.appendChild(outsideWatchlistBtn);
+
+                // Click outside the video onto the Watchlist button (video loses focus!)
+                outsideWatchlistBtn.focus();
+                outsideWatchlistBtn.dispatchEvent(new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    clientX: 100,
+                    clientY: 420
+                }));
+
+                // Hold Spacebar while video is unfocused
+                document.dispatchEvent(new KeyboardEvent('keydown', {
+                    code: 'Space',
+                    key: ' ',
+                    repeat: false,
+                    bubbles: true,
+                    cancelable: true
+                }));
+                jest.advanceTimersByTime(210);
+                expect(video.playbackRate).toBe(2.0);
+
+                document.dispatchEvent(new KeyboardEvent('keyup', {
+                    code: 'Space',
+                    key: ' ',
+                    bubbles: true,
+                    cancelable: true
+                }));
+                expect(video.playbackRate).toBe(1.0);
+
+                // Part B: Outer www.crunchyroll.com page where actual player is in an <iframe>
+                // AND outer page has a hidden 0x0 preview <video> (so attachedVideos.size > 0)
+                video.getBoundingClientRect = () => ({
+                    top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0
+                });
+
+                const playerIframe = document.createElement('iframe');
+                playerIframe.getBoundingClientRect = () => ({
+                    top: 60, bottom: 560, left: 40, right: 940, width: 900, height: 500
+                });
+                document.body.appendChild(playerIframe);
+                const mockPostMessage = jest.spyOn(playerIframe.contentWindow, 'postMessage').mockImplementation(() => {});
+
+                // Click outside the player iframe on page background
+                document.body.dispatchEvent(new MouseEvent('mousedown', {
+                    bubbles: true,
+                    cancelable: true,
+                    button: 0,
+                    clientX: 10,
+                    clientY: 700
+                }));
+
+                const kd = new KeyboardEvent('keydown', {
+                    code: 'Space',
+                    key: ' ',
+                    repeat: false,
+                    bubbles: true,
+                    cancelable: true
+                });
+                const ku = new KeyboardEvent('keyup', {
+                    code: 'Space',
+                    key: ' ',
+                    bubbles: true,
+                    cancelable: true
+                });
+                document.dispatchEvent(kd);
+                document.dispatchEvent(ku);
+
+                expect(kd.defaultPrevented).toBe(true);
+                expect(mockPostMessage).toHaveBeenCalledWith(
+                    { source: '414-vsc-space-bridge', action: 'keydown', repeat: false },
+                    '*'
+                );
+                expect(mockPostMessage).toHaveBeenCalledWith(
+                    { source: '414-vsc-space-bridge', action: 'keyup' },
+                    '*'
+                );
+            } finally {
+                delete window.location;
+                window.location = { hostname: 'newsite.com' };
+                jest.useRealTimers();
+            }
+        });
     });
 });
 

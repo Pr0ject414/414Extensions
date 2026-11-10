@@ -5,9 +5,13 @@
   cursor: none !important;
 }
 
+.cr-speed-controls-hidden [data-overlay-visible]:not([data-testid*="subtitle"]):not([data-testid*="caption"]),
 .cr-speed-controls-hidden [data-testid="top-gradient"],
+.cr-speed-controls-hidden [data-testid="bottom-gradient"],
 .cr-speed-controls-hidden [data-testid="top-controls-autohide"],
+.cr-speed-controls-hidden [data-testid="middle-controls-autohide"],
 .cr-speed-controls-hidden [data-testid="bottom-controls-autohide"],
+.cr-speed-controls-hidden[data-testid="bottom-controls-autohide"],
 .cr-speed-controls-hidden [data-testid="ratings-advisories-overlay"],
 .cr-speed-controls-hidden button[data-testid="skip-intro-button"],
 .cr-speed-controls-hidden button[data-variant] {

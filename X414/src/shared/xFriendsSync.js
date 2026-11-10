@@ -33,8 +33,30 @@ export const SELF_SYNC_PREF_KEYS = [
 export class XFriendsSyncManager {
     constructor(options = {}) {
         this.relays = options.relays || FRIEND_SYNC_CONFIG.RELAYS;
-        this.webSocketFactory = options.webSocketFactory || ((url) => new WebSocket(url));
+        this.hasCustomWebSocketFactory = typeof options.webSocketFactory === 'function';
+        this.webSocketFactory = options.webSocketFactory || ((url) => {
+            try {
+                return new WebSocket(url);
+            } catch (e) {
+                return null;
+            }
+        });
         this.fetchFn = options.fetchFn || ((...args) => globalThis.fetch(...args));
+        this.enableNip11Preflight = options.enableNip11Preflight !== undefined
+            ? Boolean(options.enableNip11Preflight)
+            : !this.hasCustomWebSocketFactory;
+        this.preflightMaxRetries = options.preflightMaxRetries !== undefined
+            ? Number(options.preflightMaxRetries)
+            : (FRIEND_SYNC_CONFIG.RELAY_PREFLIGHT_MAX_RETRIES ?? 2);
+        this.preflightRetryDelayMs = options.preflightRetryDelayMs !== undefined
+            ? Number(options.preflightRetryDelayMs)
+            : (FRIEND_SYNC_CONFIG.RELAY_PREFLIGHT_RETRY_DELAY_MS ?? 600);
+        this.batchMaxRetries = options.batchMaxRetries !== undefined
+            ? Number(options.batchMaxRetries)
+            : 1;
+        this.batchRetryDelayMs = options.batchRetryDelayMs !== undefined
+            ? Number(options.batchRetryDelayMs)
+            : (FRIEND_SYNC_CONFIG.RELAY_BATCH_RETRY_DELAY_MS ?? 800);
         this.onNotification = options.onNotification || null;
         this.isLoaded = false;
         this.isSyncing = false;
@@ -62,7 +84,8 @@ export class XFriendsSyncManager {
             notifiedInviteEmails: [], // string[]
             preferencesUpdatedAt: 0,
             lastKnownPrefsJson: '',
-            selfSyncLastSyncedAt: null
+            selfSyncLastSyncedAt: null,
+            relayHealth: {} // { [relayUrl]: { failures, cooldownUntil, updatedAt } }
         };
 
         this.mySeenSet = new Set();
@@ -74,6 +97,9 @@ export class XFriendsSyncManager {
         this.wsPool = new Map();            // relayUrl -> pooled connection entry
         this.relayCooldownUntil = new Map(); // relayUrl -> timestamp ms
         this.relayFailureCounts = new Map(); // relayUrl -> consecutive failure count
+        this.relayPreflightOkUntil = new Map(); // relayUrl -> timestamp ms
+        this.inflightPreflights = new Map(); // relayUrl -> Promise<boolean>
+        this.relayHealthDirty = false;
     }
 
     async init() {
@@ -98,14 +124,62 @@ export class XFriendsSyncManager {
                 this.state.preferencesUpdatedAt = Number(loaded.preferencesUpdatedAt) || 0;
                 this.state.lastKnownPrefsJson = typeof loaded.lastKnownPrefsJson === 'string' ? loaded.lastKnownPrefsJson : '';
                 this.state.selfSyncLastSyncedAt = loaded.selfSyncLastSyncedAt || null;
+                this.state.relayHealth = (loaded.relayHealth && typeof loaded.relayHealth === 'object') ? loaded.relayHealth : {};
             }
         } catch (err) {
             console.warn('X Friends Sync: Failed to load state from storage', err);
         }
 
+        this.restoreRelayHealthFromState();
         this.pruneMySeenIds();
         this.rebuildIndex();
         this.isLoaded = true;
+    }
+
+    restoreRelayHealthFromState() {
+        const rawHealth = this.state.relayHealth;
+        if (!rawHealth || typeof rawHealth !== 'object') return;
+        const now = Date.now();
+        const maxRetentionMs = (FRIEND_SYNC_CONFIG.RELAY_MAX_COOLDOWN_MS || (30 * 60 * 1000)) * 2;
+
+        for (const [relayUrl, info] of Object.entries(rawHealth)) {
+            if (!relayUrl || !info || typeof info !== 'object') continue;
+            const updatedAt = Number(info.updatedAt) || 0;
+            if (updatedAt > 0 && (now - updatedAt) > maxRetentionMs) continue;
+
+            const failures = Number(info.failures) || 0;
+            if (failures > 0 && !this.relayFailureCounts.has(relayUrl)) {
+                this.relayFailureCounts.set(relayUrl, failures);
+            }
+
+            const cooldownUntil = Number(info.cooldownUntil) || 0;
+            if (cooldownUntil > now && !this.relayCooldownUntil.has(relayUrl)) {
+                this.relayCooldownUntil.set(relayUrl, cooldownUntil);
+            }
+        }
+    }
+
+    syncRelayHealthToState() {
+        const now = Date.now();
+        const nextHealth = {};
+        const allUrls = new Set([
+            ...this.relayFailureCounts.keys(),
+            ...this.relayCooldownUntil.keys()
+        ]);
+
+        for (const relayUrl of allUrls) {
+            const failures = this.relayFailureCounts.get(relayUrl) || 0;
+            const cooldownUntil = this.relayCooldownUntil.get(relayUrl) || 0;
+            if (failures > 0 || cooldownUntil > now) {
+                nextHealth[relayUrl] = {
+                    failures,
+                    cooldownUntil: cooldownUntil > now ? cooldownUntil : 0,
+                    updatedAt: now
+                };
+            }
+        }
+
+        this.state.relayHealth = nextHealth;
     }
 
     async saveState() {
@@ -114,6 +188,8 @@ export class XFriendsSyncManager {
             this.state.dismissedForcedIds = Array.from(this.dismissedForcedSet);
             this.state.notifiedForcedIds = Array.from(this.notifiedForcedSet);
             this.state.notifiedInviteEmails = Array.from(this.notifiedInviteSet);
+            this.syncRelayHealthToState();
+            this.relayHealthDirty = false;
             await chrome.storage.local.set({
                 [X_FRIENDS_STATE_KEY]: this.state
             });
@@ -1805,13 +1881,20 @@ export class XFriendsSyncManager {
         const eventsToPublish = [seenEvent, selfEvent].filter(Boolean);
         if (eventsToPublish.length === 0) return false;
 
-        await this.publishEventsToRelays(eventsToPublish);
-        this.state.selfSyncLastSyncedAt = Date.now();
-        if (this.state.hasUnpublishedSeen) {
-            this.state.hasUnpublishedSeen = false;
+        const publishedRelayCount = await this.publishEventsToRelays(eventsToPublish);
+        const hasConfiguredRelays = Array.isArray(this.relays) && this.relays.length > 0;
+        if (!hasConfiguredRelays || publishedRelayCount > 0) {
+            this.state.selfSyncLastSyncedAt = Date.now();
+            if (this.state.hasUnpublishedSeen) {
+                this.state.hasUnpublishedSeen = false;
+            }
+            await this.saveState();
+            return true;
         }
+
+        this.state.hasUnpublishedSeen = true;
         await this.saveState();
-        return true;
+        return false;
     }
 
     async syncWithRelays() {
@@ -2180,6 +2263,9 @@ export class XFriendsSyncManager {
             console.warn('X Friends Sync: Relay sync error', err);
         } finally {
             this.isSyncing = false;
+            if (this.relayHealthDirty && this.isLoaded) {
+                await this.saveState();
+            }
         }
 
         if (this.pendingSyncRequested) {
@@ -2206,7 +2292,116 @@ export class XFriendsSyncManager {
         }
     }
 
-    // --- Low-Level WebSocket Relay Operations (Pooled & Multiplexed) ---
+    // --- Low-Level WebSocket Relay Operations (Pooled, Preflighted & Retry-Resilient) ---
+
+    sleepMs(ms) {
+        if (!ms || ms <= 0) return Promise.resolve();
+        return new Promise((resolve) => {
+            const t = setTimeout(resolve, ms);
+            if (typeof t?.unref === 'function') t.unref();
+        });
+    }
+
+    toHttpRelayUrl(relayUrl) {
+        if (typeof relayUrl !== 'string') return null;
+        if (relayUrl.startsWith('wss://')) return 'https://' + relayUrl.slice(6);
+        if (relayUrl.startsWith('ws://')) return 'http://' + relayUrl.slice(5);
+        return null;
+    }
+
+    recordRelayFailure(relayUrl) {
+        const failures = (this.relayFailureCounts.get(relayUrl) || 0) + 1;
+        this.relayFailureCounts.set(relayUrl, failures);
+        const baseCooldownMs = FRIEND_SYNC_CONFIG.RELAY_BASE_COOLDOWN_MS || (60 * 1000);
+        const maxCooldownMs = FRIEND_SYNC_CONFIG.RELAY_MAX_COOLDOWN_MS || (30 * 60 * 1000);
+        const backoffMs = Math.min(maxCooldownMs, baseCooldownMs * Math.pow(2, Math.min(failures - 1, 5)));
+        this.relayCooldownUntil.set(relayUrl, Date.now() + backoffMs);
+        this.relayPreflightOkUntil.delete(relayUrl);
+        this.relayHealthDirty = true;
+    }
+
+    clearRelayFailure(relayUrl) {
+        const hadFailures = this.relayFailureCounts.has(relayUrl);
+        const hadCooldown = this.relayCooldownUntil.has(relayUrl);
+        if (hadFailures) this.relayFailureCounts.delete(relayUrl);
+        if (hadCooldown) this.relayCooldownUntil.delete(relayUrl);
+        if (hadFailures || hadCooldown) {
+            this.relayHealthDirty = true;
+        }
+    }
+
+    async probeRelayHttpHealth(relayUrl) {
+        if (!this.enableNip11Preflight || typeof this.fetchFn !== 'function') {
+            return true;
+        }
+
+        const httpUrl = this.toHttpRelayUrl(relayUrl);
+        if (!httpUrl) return true;
+
+        const cachedOkUntil = this.relayPreflightOkUntil.get(relayUrl);
+        if (cachedOkUntil && Date.now() < cachedOkUntil) {
+            return true;
+        }
+
+        const inflight = this.inflightPreflights.get(relayUrl);
+        if (inflight) return inflight;
+
+        const preflightTimeoutMs = FRIEND_SYNC_CONFIG.RELAY_PREFLIGHT_TIMEOUT_MS || 3000;
+        const preflightTtlMs = FRIEND_SYNC_CONFIG.RELAY_PREFLIGHT_TTL_MS || (5 * 60 * 1000);
+        const maxRetries = Math.max(0, Number(this.preflightMaxRetries) || 0);
+        const baseRetryDelayMs = Math.max(0, Number(this.preflightRetryDelayMs) || 0);
+
+        const probePromise = (async () => {
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                const abortTimer = controller
+                    ? setTimeout(() => {
+                        try {
+                            controller.abort();
+                        } catch (e) {}
+                    }, preflightTimeoutMs)
+                    : null;
+                if (typeof abortTimer?.unref === 'function') abortTimer.unref();
+
+                try {
+                    const fetchOptions = {
+                        method: 'GET',
+                        headers: {
+                            Accept: 'application/nostr+json',
+                            'Cache-Control': 'no-cache'
+                        }
+                    };
+                    if (controller) fetchOptions.signal = controller.signal;
+
+                    const res = await this.fetchFn(httpUrl, fetchOptions);
+                    if (abortTimer) clearTimeout(abortTimer);
+
+                    // Any non-5xx / non-429 response confirms the HTTP gateway is reachable (avoids Blink 502 WS error)
+                    if (res && typeof res.status === 'number' && res.status < 500 && res.status !== 429) {
+                        this.relayPreflightOkUntil.set(relayUrl, Date.now() + preflightTtlMs);
+                        return true;
+                    }
+                } catch (err) {
+                    if (abortTimer) clearTimeout(abortTimer);
+                }
+
+                if (attempt < maxRetries && baseRetryDelayMs > 0) {
+                    const jitter = baseRetryDelayMs >= 50 ? (0.85 + Math.random() * 0.3) : 1;
+                    const delayMs = Math.round(baseRetryDelayMs * Math.pow(2, attempt) * jitter);
+                    await this.sleepMs(delayMs);
+                }
+            }
+
+            return false;
+        })();
+
+        this.inflightPreflights.set(relayUrl, probePromise);
+        try {
+            return await probePromise;
+        } finally {
+            this.inflightPreflights.delete(relayUrl);
+        }
+    }
 
     getOrOpenRelayEntry(relayUrl) {
         const cooldown = this.relayCooldownUntil.get(relayUrl);
@@ -2215,7 +2410,7 @@ export class XFriendsSyncManager {
         }
 
         const existing = this.wsPool.get(relayUrl);
-        if (existing && existing.ws && (existing.ws.readyState === 0 || existing.ws.readyState === 1)) {
+        if (existing && (existing.connecting || (existing.ws && (existing.ws.readyState === 0 || existing.ws.readyState === 1)))) {
             this.touchRelayEntry(existing);
             return existing.openPromise;
         }
@@ -2223,89 +2418,117 @@ export class XFriendsSyncManager {
         const entry = {
             relayUrl,
             ws: null,
+            connecting: true,
             listeners: new Set(),
+            closeListeners: new Set(),
             idleTimer: null,
             openPromise: null,
             openedAt: 0,
             receivedData: false
         };
 
-        const recordRelayFailure = () => {
-            const failures = (this.relayFailureCounts.get(relayUrl) || 0) + 1;
-            this.relayFailureCounts.set(relayUrl, failures);
-            const baseCooldownMs = FRIEND_SYNC_CONFIG.RELAY_BASE_COOLDOWN_MS || (60 * 1000);
-            const maxCooldownMs = FRIEND_SYNC_CONFIG.RELAY_MAX_COOLDOWN_MS || (30 * 60 * 1000);
-            const backoffMs = Math.min(maxCooldownMs, baseCooldownMs * Math.pow(2, Math.min(failures - 1, 5)));
-            this.relayCooldownUntil.set(relayUrl, Date.now() + backoffMs);
+        const notifyEntryClosed = () => {
+            for (const closeFn of Array.from(entry.closeListeners)) {
+                try {
+                    closeFn();
+                } catch (e) {}
+            }
+            entry.closeListeners.clear();
         };
 
-        entry.openPromise = new Promise((resolve) => {
-            let settled = false;
-            const fail = () => {
-                if (settled) return;
-                settled = true;
-                clearTimeout(connectTimer);
+        entry.openPromise = (async () => {
+            const httpHealthy = await this.probeRelayHttpHealth(relayUrl);
+            if (!httpHealthy) {
+                entry.connecting = false;
                 this.wsPool.delete(relayUrl);
-                recordRelayFailure();
-                this.closeRelayEntry(entry);
-                resolve(null);
-            };
+                this.recordRelayFailure(relayUrl);
+                notifyEntryClosed();
+                return null;
+            }
 
-            const connectTimer = setTimeout(fail, FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
-            if (typeof connectTimer?.unref === 'function') connectTimer.unref();
-
-            try {
-                const ws = this.webSocketFactory(relayUrl);
-                entry.ws = ws;
-
-                ws.onopen = () => {
+            return await new Promise((resolve) => {
+                let settled = false;
+                const fail = () => {
                     if (settled) return;
                     settled = true;
+                    entry.connecting = false;
                     clearTimeout(connectTimer);
-                    entry.openedAt = Date.now();
-                    this.relayCooldownUntil.delete(relayUrl);
-                    this.touchRelayEntry(entry);
-                    resolve(entry);
-                };
-
-                ws.onmessage = (msg) => {
-                    if (!entry.receivedData) {
-                        entry.receivedData = true;
-                        this.relayFailureCounts.delete(relayUrl);
-                    }
-                    this.touchRelayEntry(entry);
-                    for (const listener of Array.from(entry.listeners)) {
-                        try {
-                            listener(msg);
-                        } catch (e) {}
-                    }
-                };
-
-                ws.onerror = () => {
-                    if (!settled) {
-                        fail();
-                    } else {
-                        recordRelayFailure();
-                        this.closeRelayEntry(entry);
-                    }
-                };
-
-                ws.onclose = () => {
-                    if (entry.idleTimer) {
-                        clearTimeout(entry.idleTimer);
-                        entry.idleTimer = null;
-                    }
                     this.wsPool.delete(relayUrl);
-                    if (!settled) {
-                        fail();
-                    } else if (!entry.receivedData && entry.openedAt && (Date.now() - entry.openedAt) < 1500) {
-                        recordRelayFailure();
-                    }
+                    this.recordRelayFailure(relayUrl);
+                    notifyEntryClosed();
+                    this.closeRelayEntry(entry);
+                    resolve(null);
                 };
-            } catch (err) {
-                fail();
-            }
-        });
+
+                const connectTimer = setTimeout(fail, FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
+                if (typeof connectTimer?.unref === 'function') connectTimer.unref();
+
+                try {
+                    const ws = this.webSocketFactory(relayUrl);
+                    if (!ws) {
+                        fail();
+                        return;
+                    }
+                    entry.ws = ws;
+
+                    ws.onopen = () => {
+                        if (settled) return;
+                        settled = true;
+                        entry.connecting = false;
+                        clearTimeout(connectTimer);
+                        entry.openedAt = Date.now();
+                        if (this.relayCooldownUntil.has(relayUrl)) {
+                            this.relayCooldownUntil.delete(relayUrl);
+                            this.relayHealthDirty = true;
+                        }
+                        this.touchRelayEntry(entry);
+                        resolve(entry);
+                    };
+
+                    ws.onmessage = (msg) => {
+                        if (!entry.receivedData) {
+                            entry.receivedData = true;
+                            this.clearRelayFailure(relayUrl);
+                        }
+                        this.touchRelayEntry(entry);
+                        for (const listener of Array.from(entry.listeners)) {
+                            try {
+                                listener(msg);
+                            } catch (e) {}
+                        }
+                    };
+
+                    ws.onerror = () => {
+                        this.relayPreflightOkUntil.delete(relayUrl);
+                        if (!settled) {
+                            fail();
+                        } else {
+                            this.recordRelayFailure(relayUrl);
+                            notifyEntryClosed();
+                            this.closeRelayEntry(entry);
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        if (entry.idleTimer) {
+                            clearTimeout(entry.idleTimer);
+                            entry.idleTimer = null;
+                        }
+                        this.wsPool.delete(relayUrl);
+                        if (!settled) {
+                            fail();
+                        } else {
+                            if (!entry.receivedData && entry.openedAt && (Date.now() - entry.openedAt) < 1500) {
+                                this.recordRelayFailure(relayUrl);
+                            }
+                            notifyEntryClosed();
+                        }
+                    };
+                } catch (err) {
+                    fail();
+                }
+            });
+        })();
 
         this.wsPool.set(relayUrl, entry);
         return entry.openPromise;
@@ -2324,9 +2547,18 @@ export class XFriendsSyncManager {
 
     closeRelayEntry(entry) {
         if (!entry) return;
+        entry.connecting = false;
         if (entry.idleTimer) {
             clearTimeout(entry.idleTimer);
             entry.idleTimer = null;
+        }
+        if (entry.closeListeners && entry.closeListeners.size > 0) {
+            for (const closeFn of Array.from(entry.closeListeners)) {
+                try {
+                    closeFn();
+                } catch (e) {}
+            }
+            entry.closeListeners.clear();
         }
         this.wsPool.delete(entry.relayUrl);
         const ws = entry.ws;
@@ -2343,112 +2575,200 @@ export class XFriendsSyncManager {
         } catch (e) {}
     }
 
-    async publishEventsToRelays(events) {
-        if (!events || events.length === 0 || !this.relays || this.relays.length === 0) return;
+    resetSingleFailureCooldownsForRetry() {
+        for (const relayUrl of this.relays) {
+            const failures = this.relayFailureCounts.get(relayUrl) || 0;
+            if (failures === 1) {
+                this.relayFailureCounts.delete(relayUrl);
+                this.relayCooldownUntil.delete(relayUrl);
+            }
+        }
+    }
 
-        const targetIds = new Set(events.map(e => e.id));
+    async publishToSingleRelay(relayUrl, events, targetIds, allowStaleReconnect = true) {
+        const pooledBefore = this.wsPool.get(relayUrl);
+        const wasPooledOpen = Boolean(pooledBefore && pooledBefore.ws && pooledBefore.ws.readyState === 1);
 
-        const tasks = this.relays.map(async (relayUrl) => {
-            const entry = await this.getOrOpenRelayEntry(relayUrl);
-            if (!entry || !entry.ws || entry.ws.readyState !== 1) return;
+        const entry = await this.getOrOpenRelayEntry(relayUrl);
+        if (!entry || !entry.ws || entry.ws.readyState !== 1) return false;
 
-            await new Promise((resolve) => {
-                let settled = false;
-                let okCount = 0;
+        const result = await new Promise((resolve) => {
+            let settled = false;
+            let okCount = 0;
+            let closedEarly = false;
 
-                const finish = () => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timer);
-                    entry.listeners.delete(onMessage);
-                    this.touchRelayEntry(entry);
-                    resolve();
-                };
+            const finish = (didSucceed) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                entry.listeners.delete(onMessage);
+                entry.closeListeners.delete(onClose);
+                this.touchRelayEntry(entry);
+                resolve({ ok: didSucceed, closedEarly });
+            };
 
-                const timer = setTimeout(finish, FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
-                if (typeof timer?.unref === 'function') timer.unref();
+            const onClose = () => {
+                closedEarly = true;
+                finish(okCount > 0);
+            };
 
-                const onMessage = (msg) => {
-                    try {
-                        const data = JSON.parse(msg.data);
-                        if (Array.isArray(data) && data[0] === 'OK' && targetIds.has(data[1])) {
-                            okCount++;
-                            if (okCount >= events.length) finish();
-                        }
-                    } catch (e) {}
-                };
+            const timer = setTimeout(() => finish(okCount > 0), FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
+            if (typeof timer?.unref === 'function') timer.unref();
 
-                entry.listeners.add(onMessage);
+            const onMessage = (msg) => {
                 try {
-                    for (const ev of events) {
-                        entry.ws.send(JSON.stringify(['EVENT', ev]));
+                    const data = JSON.parse(msg.data);
+                    if (Array.isArray(data) && data[0] === 'OK' && targetIds.has(data[1])) {
+                        okCount++;
+                        if (okCount >= events.length) finish(true);
                     }
-                } catch (err) {
-                    finish();
+                } catch (e) {}
+            };
+
+            entry.listeners.add(onMessage);
+            entry.closeListeners.add(onClose);
+            try {
+                for (const ev of events) {
+                    entry.ws.send(JSON.stringify(['EVENT', ev]));
                 }
-            });
+            } catch (err) {
+                closedEarly = true;
+                this.closeRelayEntry(entry);
+                finish(false);
+            }
         });
 
-        await Promise.allSettled(tasks);
+        if (!result.ok && result.closedEarly && wasPooledOpen && allowStaleReconnect) {
+            this.relayCooldownUntil.delete(relayUrl);
+            return this.publishToSingleRelay(relayUrl, events, targetIds, false);
+        }
+
+        return result.ok;
+    }
+
+    async publishEventsToRelays(events) {
+        if (!events || events.length === 0 || !this.relays || this.relays.length === 0) return 0;
+
+        const targetIds = new Set(events.map(e => e.id));
+        const maxRetries = Math.max(0, Number(this.batchMaxRetries) || 0);
+        let publishedRelayCount = 0;
+
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const outcomes = await Promise.allSettled(
+                this.relays.map(relayUrl => this.publishToSingleRelay(relayUrl, events, targetIds))
+            );
+            publishedRelayCount = outcomes.filter(r => r.status === 'fulfilled' && r.value === true).length;
+            if (publishedRelayCount > 0) break;
+
+            if (attempt < maxRetries) {
+                this.resetSingleFailureCooldownsForRetry();
+                await this.sleepMs(this.batchRetryDelayMs);
+            }
+        }
+
+        if (this.relayHealthDirty && this.isLoaded) {
+            await this.saveState();
+        }
+        return publishedRelayCount;
+    }
+
+    async querySingleRelay(relayUrl, subId, filters, collectedByKey, allowStaleReconnect = true) {
+        const pooledBefore = this.wsPool.get(relayUrl);
+        const wasPooledOpen = Boolean(pooledBefore && pooledBefore.ws && pooledBefore.ws.readyState === 1);
+
+        const entry = await this.getOrOpenRelayEntry(relayUrl);
+        if (!entry || !entry.ws || entry.ws.readyState !== 1) return false;
+
+        const result = await new Promise((resolve) => {
+            let settled = false;
+            let gotResponse = false;
+            let closedEarly = false;
+
+            const finish = (didSucceed) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                entry.listeners.delete(onMessage);
+                entry.closeListeners.delete(onClose);
+                try {
+                    if (entry.ws && entry.ws.readyState === 1) {
+                        entry.ws.send(JSON.stringify(['CLOSE', subId]));
+                    }
+                } catch (e) {}
+                this.touchRelayEntry(entry);
+                resolve({ ok: didSucceed, closedEarly });
+            };
+
+            const onClose = () => {
+                closedEarly = true;
+                finish(gotResponse);
+            };
+
+            const timer = setTimeout(() => finish(gotResponse), FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
+            if (typeof timer?.unref === 'function') timer.unref();
+
+            const onMessage = (msg) => {
+                try {
+                    const data = JSON.parse(msg.data);
+                    if (!Array.isArray(data)) return;
+                    if (data[0] === 'EVENT' && data[1] === subId && data[2]) {
+                        gotResponse = true;
+                        const ev = data[2];
+                        const dTag = (ev.tags || []).find(t => t[0] === 'd')?.[1] || '';
+                        const key = `${ev.pubkey}:${ev.kind}:${dTag}`;
+                        const existing = collectedByKey.get(key);
+                        if (!existing || ev.created_at >= existing.created_at) {
+                            collectedByKey.set(key, ev);
+                        }
+                    } else if (data[0] === 'EOSE' && data[1] === subId) {
+                        gotResponse = true;
+                        finish(true);
+                    }
+                } catch (e) {}
+            };
+
+            entry.listeners.add(onMessage);
+            entry.closeListeners.add(onClose);
+            try {
+                entry.ws.send(JSON.stringify(['REQ', subId, ...filters]));
+            } catch (err) {
+                closedEarly = true;
+                this.closeRelayEntry(entry);
+                finish(false);
+            }
+        });
+
+        if (!result.ok && result.closedEarly && wasPooledOpen && allowStaleReconnect) {
+            this.relayCooldownUntil.delete(relayUrl);
+            return this.querySingleRelay(relayUrl, subId, filters, collectedByKey, false);
+        }
+
+        return result.ok;
     }
 
     async queryRelays(filters) {
         if (!filters || filters.length === 0 || !this.relays || this.relays.length === 0) return [];
 
         const collectedByKey = new Map(); // replaceableKey -> event
-        const subId = '414x_' + Math.random().toString(36).slice(2, 10);
+        const maxRetries = Math.max(0, Number(this.batchMaxRetries) || 0);
 
-        const tasks = this.relays.map(async (relayUrl) => {
-            const entry = await this.getOrOpenRelayEntry(relayUrl);
-            if (!entry || !entry.ws || entry.ws.readyState !== 1) return;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            const subId = '414x_' + Math.random().toString(36).slice(2, 10);
+            const outcomes = await Promise.allSettled(
+                this.relays.map(relayUrl => this.querySingleRelay(relayUrl, subId, filters, collectedByKey))
+            );
+            const activeCount = outcomes.filter(r => r.status === 'fulfilled' && r.value === true).length;
+            if (activeCount > 0) break;
 
-            await new Promise((resolve) => {
-                let settled = false;
-                const finish = () => {
-                    if (settled) return;
-                    settled = true;
-                    clearTimeout(timer);
-                    entry.listeners.delete(onMessage);
-                    try {
-                        if (entry.ws && entry.ws.readyState === 1) {
-                            entry.ws.send(JSON.stringify(['CLOSE', subId]));
-                        }
-                    } catch (e) {}
-                    this.touchRelayEntry(entry);
-                    resolve();
-                };
+            if (attempt < maxRetries) {
+                this.resetSingleFailureCooldownsForRetry();
+                await this.sleepMs(this.batchRetryDelayMs);
+            }
+        }
 
-                const timer = setTimeout(finish, FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
-                if (typeof timer?.unref === 'function') timer.unref();
-
-                const onMessage = (msg) => {
-                    try {
-                        const data = JSON.parse(msg.data);
-                        if (!Array.isArray(data)) return;
-                        if (data[0] === 'EVENT' && data[1] === subId && data[2]) {
-                            const ev = data[2];
-                            const dTag = (ev.tags || []).find(t => t[0] === 'd')?.[1] || '';
-                            const key = `${ev.pubkey}:${ev.kind}:${dTag}`;
-                            const existing = collectedByKey.get(key);
-                            if (!existing || ev.created_at >= existing.created_at) {
-                                collectedByKey.set(key, ev);
-                            }
-                        } else if (data[0] === 'EOSE' && data[1] === subId) {
-                            finish();
-                        }
-                    } catch (e) {}
-                };
-
-                entry.listeners.add(onMessage);
-                try {
-                    entry.ws.send(JSON.stringify(['REQ', subId, ...filters]));
-                } catch (err) {
-                    finish();
-                }
-            });
-        });
-
-        await Promise.allSettled(tasks);
+        if (this.relayHealthDirty && this.isLoaded) {
+            await this.saveState();
+        }
 
         const verifiedEvents = [];
         for (const ev of collectedByKey.values()) {
