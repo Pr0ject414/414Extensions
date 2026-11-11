@@ -1230,6 +1230,20 @@ export class XFriendsSyncManager {
 
     async dismissForcedTweet(tweetId) {
         await this.init();
+        if (Array.isArray(tweetId)) {
+            const validIds = tweetId.map(id => String(id || '').trim()).filter(id => this.isValidRecentTweetId(id));
+            if (validIds.length === 0) return { dismissed: false };
+            for (const id of validIds) {
+                this.dismissedForcedSet.add(id);
+                this.mySeenSet.add(id);
+            }
+            this.state.hasUnpublishedSeen = true;
+            this.scheduleSnapshotFlush();
+            await this.saveState();
+            this.broadcastDismissUpdateToTabs(validIds);
+            return { dismissed: true, tweetId: validIds[0], tweetIds: validIds };
+        }
+
         const id = String(tweetId || '').trim();
         if (!this.isValidRecentTweetId(id)) return { dismissed: false };
 
@@ -1238,6 +1252,7 @@ export class XFriendsSyncManager {
         this.state.hasUnpublishedSeen = true;
         this.scheduleSnapshotFlush();
         await this.saveState();
+        this.broadcastDismissUpdateToTabs(id);
 
         return { dismissed: true, tweetId: id };
     }
@@ -1271,7 +1286,7 @@ export class XFriendsSyncManager {
             }
             const forcedByEntries = this.tweetToForcedByMap.get(id);
             if (forcedByEntries && forcedByEntries.length > 0) {
-                forcedMap[id] = forcedByEntries.map(e => e.label);
+                forcedMap[id] = forcedByEntries.map(e => (typeof e === 'object' && e ? (e.label || e.email || e.displayName) : e));
             }
             if (this.state.myForcedMap && this.state.myForcedMap[id]) {
                 myForcedIds.push(id);
@@ -2283,6 +2298,26 @@ export class XFriendsSyncManager {
                 tabs.forEach(tab => {
                     if (tab.id) {
                         chrome.tabs.sendMessage(tab.id, { action: 'X_FRIENDS_SEEN_UPDATED' }).catch(() => {});
+                    }
+                });
+            });
+        } catch (e) {
+            // Ignore tab messaging errors
+        }
+    }
+
+    broadcastDismissUpdateToTabs(tweetIdOrIds) {
+        try {
+            if (!chrome?.tabs?.query) return;
+            const ids = Array.isArray(tweetIdOrIds) ? tweetIdOrIds : [tweetIdOrIds].filter(Boolean);
+            chrome.tabs.query({ url: ['*://twitter.com/*', '*://x.com/*'] }, (tabs) => {
+                if (!Array.isArray(tabs)) return;
+                tabs.forEach(tab => {
+                    if (tab.id) {
+                        chrome.tabs.sendMessage(tab.id, {
+                            action: 'X_FRIENDS_DISMISS_UPDATED',
+                            payload: { tweetIds: ids, tweetId: ids[0] }
+                        }).catch(() => {});
                     }
                 });
             });

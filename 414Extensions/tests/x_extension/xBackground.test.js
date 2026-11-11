@@ -178,6 +178,18 @@ describe('xBackground', () => {
             dismissed: true
         }));
 
+        const sendResponseDismissBatch = jest.fn();
+        handleMessage({
+            action: 'X_DISMISS_FORCED_TWEET',
+            payload: { tweetIds: ['1850000000000000123', '1850000000000000124'] }
+        }, {}, sendResponseDismissBatch);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(sendResponseDismissBatch).toHaveBeenCalledWith(expect.objectContaining({
+            success: true,
+            dismissed: true,
+            tweetIds: ['1850000000000000123', '1850000000000000124']
+        }));
+
         const sendResponseUnforce = jest.fn();
         handleMessage({
             action: 'X_UNFORCE_TWEET',

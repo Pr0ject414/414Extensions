@@ -652,28 +652,36 @@
             },
             onDismissForced: (tid) => {
                 if (!isContextValid() || !tid) return;
-                const normId = String(tid).trim();
-                addLocallyMarkedSeen(normId);
-                dismissedForcedLocalSet.add(normId);
+                const rawIds = Array.isArray(tid) ? tid : [tid];
+                const normIds = rawIds.map(id => String(id || '').trim()).filter(Boolean);
+                if (normIds.length === 0) return;
+
+                normIds.forEach(normId => {
+                    addLocallyMarkedSeen(normId);
+                    dismissedForcedLocalSet.add(normId);
+                });
 
                 if (cachedTimelineData && typeof cachedTimelineData === 'object') {
                     if (Array.isArray(cachedTimelineData.unseenForcedPosts)) {
                         cachedTimelineData.unseenForcedPosts = cachedTimelineData.unseenForcedPosts.filter(
-                            p => p && String(p.tweetId) !== normId
+                            p => p && !normIds.includes(String(p.tweetId || p))
                         );
                     }
                     if (Array.isArray(cachedTimelineData.timelinePosts)) {
                         cachedTimelineData.timelinePosts.forEach(p => {
-                            if (p && String(p.tweetId) === normId) {
+                            if (p && normIds.includes(String(p.tweetId))) {
                                 p.isDismissed = true;
                                 p.isSeenByMe = true;
                             }
                         });
                     }
+                    cachedTimelineData.unseenForcedCount = Array.isArray(cachedTimelineData.unseenForcedPosts)
+                        ? cachedTimelineData.unseenForcedPosts.length
+                        : 0;
                 }
 
                 if (window.XLocationUI && typeof window.XLocationUI.markCardSeenInDOM === 'function') {
-                    window.XLocationUI.markCardSeenInDOM(normId);
+                    normIds.forEach(normId => window.XLocationUI.markCardSeenInDOM(normId));
                 }
                 const currentTabList = findHomeTabList();
                 if (currentTabList && window.XLocationUI && typeof window.XLocationUI.ensureFriendsTimelineTab === 'function') {
@@ -682,7 +690,7 @@
 
                 chrome.runtime.sendMessage({
                     action: 'X_DISMISS_FORCED_TWEET',
-                    payload: { tweetId: normId }
+                    payload: { tweetId: normIds[0], tweetIds: normIds }
                 }, () => {
                     if (safeHasError()) return;
                 });
@@ -2142,8 +2150,23 @@
     try {
         if (chrome.runtime && chrome.runtime.onMessage) {
             chrome.runtime.onMessage.addListener((request) => {
-                if (request && request.action === 'X_FRIENDS_SEEN_UPDATED') {
+                if (request && (request.action === 'X_FRIENDS_SEEN_UPDATED' || request.action === 'X_FRIENDS_DISMISS_UPDATED')) {
+                    if (request.action === 'X_FRIENDS_DISMISS_UPDATED' && request.payload) {
+                        const rawIds = request.payload.tweetIds || (request.payload.tweetId ? [request.payload.tweetId] : []);
+                        rawIds.forEach(rawId => {
+                            const dismissedId = String(rawId || '').trim();
+                            if (dismissedId) {
+                                dismissedForcedLocalSet.add(dismissedId);
+                                if (cachedTimelineData && Array.isArray(cachedTimelineData.unseenForcedPosts)) {
+                                    cachedTimelineData.unseenForcedPosts = cachedTimelineData.unseenForcedPosts.filter(
+                                        p => p && String(p.tweetId || p) !== dismissedId
+                                    );
+                                }
+                            }
+                        });
+                    }
                     scanTweetsForFriendsSync(true);
+                    syncFriendsTimelineUI(true);
                 }
             });
         }

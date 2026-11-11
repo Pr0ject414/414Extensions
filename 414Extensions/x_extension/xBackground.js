@@ -280,8 +280,9 @@ export function handleMessage(request, sender, sendResponse) {
     }
 
     if (request.action === "X_DISMISS_FORCED_TWEET") {
-        const { tweetId } = request.payload || {};
-        friendsSync.dismissForcedTweet(tweetId).then(res => {
+        const { tweetId, tweetIds } = request.payload || {};
+        const target = tweetIds || tweetId;
+        friendsSync.dismissForcedTweet(target).then(res => {
             sendResponse({ success: true, ...res });
         }).catch(err => {
             sendResponse({ success: false, error: err.message });

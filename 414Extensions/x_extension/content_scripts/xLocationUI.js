@@ -1983,6 +1983,9 @@
                 container._xIntentionallyRemoved = true;
                 container.parentNode.removeChild(container);
             }
+            if (container) {
+                container._xActiveForcedPosts = [];
+            }
             homeFeedScrolledPast = false;
             homeFeedMountedForcedIds.clear();
             return null;
@@ -2112,21 +2115,30 @@
             dismissAllBtn.addEventListener('click', (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                const currentPosts = container._xActiveForcedPosts || activeForcedPosts;
+                const currentPosts = (container._xActiveForcedPosts || activeForcedPosts || []).slice();
                 const activeCbs = container._xCallbacks || callbacks;
                 container._xIntentionallyRemoved = true;
+                container._xActiveForcedPosts = [];
+                if (listWrap) {
+                    listWrap.innerHTML = '';
+                }
                 if (container.parentNode) {
                     container.parentNode.removeChild(container);
                 }
+                const tweetIds = [];
                 currentPosts.forEach(p => {
                     if (p && p.tweetId) {
                         p.isDismissed = true;
                         p.isSeenByMe = true;
+                        tweetIds.push(p.tweetId);
                         if (typeof activeCbs.onDismissForced === 'function') {
                             activeCbs.onDismissForced(p.tweetId);
                         }
                     }
                 });
+                if (typeof activeCbs.onDismissAllForced === 'function') {
+                    activeCbs.onDismissAllForced(tweetIds);
+                }
             });
             bannerHeader.appendChild(dismissAllBtn);
             container.appendChild(bannerHeader);
@@ -2164,6 +2176,7 @@
                     }
                     if (listWrap.children.length === 0 && container.parentNode) {
                         container._xIntentionallyRemoved = true;
+                        container._xActiveForcedPosts = [];
                         container.parentNode.removeChild(container);
                     } else {
                         const titleEl = container.querySelector('.x-forced-home-title');

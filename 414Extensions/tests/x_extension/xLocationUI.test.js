@@ -737,6 +737,113 @@ describe('xLocationUI.js', () => {
         expect(homeFeed.querySelector('#x-forced-home-feed')).toBeNull();
     });
 
+    test('renderForcedPostsInHomeFeed should dismiss all posts when Dismiss All button is clicked, resetting container state and invoking callbacks', () => {
+        const homeFeed = document.createElement('section');
+        const existingTweet = document.createElement('article');
+        existingTweet.textContent = 'Native timeline tweet';
+        homeFeed.appendChild(existingTweet);
+        document.body.appendChild(homeFeed);
+
+        const onDismissForced = jest.fn();
+        const onDismissAllForced = jest.fn();
+
+        const posts = [
+            {
+                tweetId: '1850000000000000701',
+                forcedBy: ['Alice (alice@example.com)'],
+                seenBy: ['Alice (alice@example.com)'],
+                meta: {
+                    screenName: 'nasa',
+                    authorName: 'NASA',
+                    text: 'Post 1'
+                }
+            },
+            {
+                tweetId: '1850000000000000702',
+                forcedBy: ['Bob (bob@example.com)'],
+                seenBy: ['Bob (bob@example.com)'],
+                meta: {
+                    screenName: 'spacex',
+                    authorName: 'SpaceX',
+                    text: 'Post 2'
+                }
+            }
+        ];
+
+        const container = window.XLocationUI.renderForcedPostsInHomeFeed(
+            homeFeed,
+            posts,
+            { onDismissForced, onDismissAllForced }
+        );
+
+        expect(container).not.toBeNull();
+        expect(homeFeed.firstChild).toBe(container);
+        expect(container.textContent).toContain('Forced to Your Timeline by Friends (2)');
+
+        const dismissAllBtn = container.querySelector('.x-forced-dismiss-all-btn');
+        expect(dismissAllBtn).not.toBeNull();
+        expect(dismissAllBtn.textContent).toBe('Dismiss All');
+
+        dismissAllBtn.click();
+
+        // Banner immediately removed from DOM
+        expect(homeFeed.querySelector('#x-forced-home-feed')).toBeNull();
+        expect(container.parentNode).toBeNull();
+        expect(container._xIntentionallyRemoved).toBe(true);
+        expect(container._xActiveForcedPosts).toEqual([]);
+
+        // Callback verification
+        expect(onDismissForced).toHaveBeenCalledWith('1850000000000000701');
+        expect(onDismissForced).toHaveBeenCalledWith('1850000000000000702');
+        expect(onDismissAllForced).toHaveBeenCalledWith(['1850000000000000701', '1850000000000000702']);
+    });
+
+    test('renderForcedPostsInHomeFeed should update title count when dismissing individual cards and tear down container when last card is dismissed', () => {
+        const homeFeed = document.createElement('section');
+        document.body.appendChild(homeFeed);
+
+        const onDismissForced = jest.fn();
+        const posts = [
+            {
+                tweetId: '1850000000000000801',
+                forcedBy: ['Alice'],
+                seenBy: ['Alice'],
+                meta: { screenName: 'author1', authorName: 'Author 1', text: 'Tweet 1' }
+            },
+            {
+                tweetId: '1850000000000000802',
+                forcedBy: ['Bob'],
+                seenBy: ['Bob'],
+                meta: { screenName: 'author2', authorName: 'Author 2', text: 'Tweet 2' }
+            }
+        ];
+
+        const container = window.XLocationUI.renderForcedPostsInHomeFeed(
+            homeFeed,
+            posts,
+            { onDismissForced }
+        );
+
+        expect(container.textContent).toContain('Forced to Your Timeline by Friends (2)');
+        const dismissBtns = container.querySelectorAll('.x-forced-dismiss-btn');
+        expect(dismissBtns.length).toBe(2);
+
+        // Dismiss first card
+        dismissBtns[0].click();
+        expect(onDismissForced).toHaveBeenCalledWith('1850000000000000801');
+        expect(container.textContent).toContain('Forced to Your Timeline by Friends (1)');
+        expect(container._xActiveForcedPosts.length).toBe(1);
+        expect(homeFeed.querySelector('#x-forced-home-feed')).not.toBeNull();
+
+        // Dismiss second card
+        const remainingDismissBtn = container.querySelector('.x-forced-dismiss-btn');
+        remainingDismissBtn.click();
+        expect(onDismissForced).toHaveBeenCalledWith('1850000000000000802');
+        expect(homeFeed.querySelector('#x-forced-home-feed')).toBeNull();
+        expect(container._xIntentionallyRemoved).toBe(true);
+        expect(container._xActiveForcedPosts).toEqual([]);
+    });
+
     test('renderFriendsTimeline should paginate posts (20 per page), request hydration for unhydrated bare IDs, and upgrade cards to playable video posts', () => {
         const host = document.createElement('div');
         document.body.appendChild(host);
@@ -2583,6 +2690,95 @@ describe('xLocationUI.js', () => {
         const badgeFlag = recycledHeader.querySelector('.x-location-flag');
         expect(badgeFlag).not.toBeNull();
         expect(badgeFlag.title).toContain('United States');
+
+        jest.useRealTimers();
+    });
+
+    test('xObserver should remove forced banner and update badge when receiving cross-tab X_FRIENDS_DISMISS_UPDATED broadcast', () => {
+        jest.useFakeTimers();
+        delete window.XObserverInjected;
+
+        let messageListener = null;
+        global.chrome = {
+            runtime: {
+                id: 'test-ext-id',
+                lastError: null,
+                onMessage: {
+                    addListener: jest.fn((listener) => { messageListener = listener; })
+                },
+                sendMessage: jest.fn((msg, cb) => {
+                    if (msg.action === 'X_GET_FRIENDS_TIMELINE' && cb) {
+                        cb({
+                            success: true,
+                            timelinePosts: [],
+                            unseenForcedPosts: [],
+                            connectedFriends: []
+                        });
+                    } else if (cb) {
+                        cb({ success: true });
+                    }
+                })
+            },
+            storage: {
+                local: {
+                    get: jest.fn((keys, cb) => {
+                        cb({
+                            isGlobalMasterSwitchEnabled: true,
+                            isXModuleEnabled: true,
+                            isXLocationEnabled: true,
+                            isXHideAdsEnabled: true,
+                            isXFriendsSyncEnabled: true,
+                            blockedCountries: [],
+                            blockedDeviceRegions: [],
+                            blockedNameFlags: []
+                        });
+                    })
+                },
+                onChanged: { addListener: jest.fn() }
+            }
+        };
+
+        const tabList = document.createElement('div');
+        tabList.setAttribute('role', 'tablist');
+        const forYouTab = document.createElement('div');
+        forYouTab.setAttribute('role', 'tab');
+        forYouTab.textContent = 'For you';
+        tabList.appendChild(forYouTab);
+        document.body.appendChild(tabList);
+
+        const primaryCol = document.createElement('div');
+        primaryCol.setAttribute('data-testid', 'primaryColumn');
+        const nativeFeed = document.createElement('section');
+        nativeFeed.setAttribute('role', 'region');
+        primaryCol.appendChild(nativeFeed);
+        document.body.appendChild(primaryCol);
+
+        // Pre-render the forced feed banner with a post
+        const forcedPost = {
+            tweetId: '1850000000000000999',
+            forcedBy: ['Alice'],
+            seenBy: ['Alice'],
+            meta: { screenName: 'author', authorName: 'Author', text: 'Cross tab test' }
+        };
+        window.XLocationUI.renderForcedPostsInHomeFeed(nativeFeed, [forcedPost]);
+        expect(nativeFeed.querySelector('#x-forced-home-feed')).not.toBeNull();
+
+        const observerScriptPath = path.resolve(__dirname, '../../x_extension/content_scripts/xObserver.js');
+        const observerScriptContent = fs.readFileSync(observerScriptPath, 'utf8');
+        eval(observerScriptContent);
+
+        expect(typeof messageListener).toBe('function');
+
+        // Receive X_FRIENDS_DISMISS_UPDATED broadcast from another tab
+        messageListener({
+            action: 'X_FRIENDS_DISMISS_UPDATED',
+            payload: { tweetIds: ['1850000000000000999'], tweetId: '1850000000000000999' }
+        });
+
+        jest.advanceTimersByTime(250);
+
+        // Banner must be removed across tabs without user manual refresh
+        expect(nativeFeed.querySelector('#x-forced-home-feed')).toBeNull();
 
         jest.useRealTimers();
     });

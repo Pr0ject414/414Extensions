@@ -662,7 +662,8 @@ export class XHostCoordinator {
             case 'X_DISMISS_FORCED_TWEET':
             case 'X_FRIENDS_DISMISS_FORCED': {
                 try {
-                    const res = await this.friendsSync.dismissForcedTweet(payload?.tweetId);
+                    const target = payload?.tweetIds || payload?.tweetId;
+                    const res = await this.friendsSync.dismissForcedTweet(target);
                     return { success: true, ...res };
                 } catch (err) {
                     return { success: false, error: err.message };

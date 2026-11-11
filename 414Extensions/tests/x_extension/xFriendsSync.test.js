@@ -800,5 +800,108 @@ describe('XFriendsSyncManager', () => {
         expect(offlineResult).toBe(false);
         expect(offlineManager.state.hasUnpublishedSeen).toBe(true);
     });
+
+    test('dismissForcedTweet should support batch array of tweet IDs, broadcast X_FRIENDS_DISMISS_UPDATED to all open tabs, and update timeline state', async () => {
+        const testTabs = [{ id: 101 }, { id: 202 }];
+        global.chrome.tabs.query = jest.fn((q, cb) => cb && cb(testTabs));
+        global.chrome.tabs.sendMessage = jest.fn().mockResolvedValue({});
+
+        const manager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+        await manager.setIdentity('charlie@example.com', 'Charlie');
+
+        // Set up incoming forced tweets in manager's cache
+        manager.state.cachedForcedTweets = [
+            {
+                tweetId: '1850000000000001001',
+                senderPubkey: 'alicepubkey',
+                senderEmail: 'alice@example.com',
+                forcedBy: ['Alice'],
+                meta: { text: 'Forced tweet 1' }
+            },
+            {
+                tweetId: '1850000000000001002',
+                senderPubkey: 'alicepubkey',
+                senderEmail: 'alice@example.com',
+                forcedBy: ['Alice'],
+                meta: { text: 'Forced tweet 2' }
+            },
+            {
+                tweetId: '1850000000000001003',
+                senderPubkey: 'alicepubkey',
+                senderEmail: 'alice@example.com',
+                forcedBy: ['Alice'],
+                meta: { text: 'Forced tweet 3' }
+            }
+        ];
+        manager.tweetToForcedByMap.set('1850000000000001001', [{ label: 'Alice', email: 'alice@example.com' }]);
+        manager.tweetToForcedByMap.set('1850000000000001002', [{ label: 'Alice', email: 'alice@example.com' }]);
+        manager.tweetToForcedByMap.set('1850000000000001003', [{ label: 'Alice', email: 'alice@example.com' }]);
+
+        // Before dismiss: 3 unseen forced posts in getFriendsTimelineData
+        const initialTimeline = manager.getFriendsTimelineData();
+        expect(initialTimeline.unseenForcedPosts.length).toBe(3);
+
+        // 1. Single dismiss via dismissForcedTweet('1850000000000001001')
+        const singleDismissRes = await manager.dismissForcedTweet('1850000000000001001');
+        expect(singleDismissRes.dismissed).toBe(true);
+        expect(singleDismissRes.tweetId).toBe('1850000000000001001');
+        expect(manager.dismissedForcedSet.has('1850000000000001001')).toBe(true);
+        expect(manager.mySeenSet.has('1850000000000001001')).toBe(true);
+        expect(global.chrome.tabs.sendMessage).toHaveBeenCalledWith(101, {
+            action: 'X_FRIENDS_DISMISS_UPDATED',
+            payload: { tweetIds: ['1850000000000001001'], tweetId: '1850000000000001001' }
+        });
+
+        // 2. Batch dismiss via dismissForcedTweet(['1850000000000001002', '1850000000000001003'])
+        global.chrome.tabs.sendMessage.mockClear();
+        const batchDismissRes = await manager.dismissForcedTweet(['1850000000000001002', '1850000000000001003']);
+        expect(batchDismissRes.dismissed).toBe(true);
+        expect(batchDismissRes.tweetIds).toEqual(['1850000000000001002', '1850000000000001003']);
+        expect(manager.dismissedForcedSet.has('1850000000000001002')).toBe(true);
+        expect(manager.dismissedForcedSet.has('1850000000000001003')).toBe(true);
+        expect(manager.mySeenSet.has('1850000000000001002')).toBe(true);
+        expect(manager.mySeenSet.has('1850000000000001003')).toBe(true);
+
+        // Multi-tab broadcast verified
+        expect(global.chrome.tabs.sendMessage).toHaveBeenCalledWith(101, {
+            action: 'X_FRIENDS_DISMISS_UPDATED',
+            payload: {
+                tweetIds: ['1850000000000001002', '1850000000000001003'],
+                tweetId: '1850000000000001002'
+            }
+        });
+        expect(global.chrome.tabs.sendMessage).toHaveBeenCalledWith(202, {
+            action: 'X_FRIENDS_DISMISS_UPDATED',
+            payload: {
+                tweetIds: ['1850000000000001002', '1850000000000001003'],
+                tweetId: '1850000000000001002'
+            }
+        });
+
+        // 3. getFriendsTimelineData after dismissal:
+        // unseenForcedPosts should now be completely empty (dismissed from unread banner)
+        const timelineAfterDismiss = manager.getFriendsTimelineData();
+        expect(timelineAfterDismiss.unseenForcedPosts.length).toBe(0);
+
+        // timelinePosts still contains the posts with isForced: true, isSeenByMe: true, isDismissed: true
+        expect(timelineAfterDismiss.timelinePosts.length).toBe(3);
+        expect(timelineAfterDismiss.timelinePosts[0].isForced).toBe(true);
+        expect(timelineAfterDismiss.timelinePosts[0].isSeenByMe).toBe(true);
+        expect(timelineAfterDismiss.timelinePosts[0].isDismissed).toBe(true);
+
+        // 4. In-feed status still shows forcedBy badge (user preference: "I do not mind this")
+        const status = manager.checkTweetsSyncStatus(['1850000000000001001', '1850000000000001002']);
+        expect(status.forcedMap['1850000000000001001']).toEqual(['Alice']);
+        expect(status.forcedMap['1850000000000001002']).toEqual(['Alice']);
+
+        // 5. Invalid IDs gracefully return dismissed: false
+        const invalidRes = await manager.dismissForcedTweet('');
+        expect(invalidRes.dismissed).toBe(false);
+        const invalidArrayRes = await manager.dismissForcedTweet(['', 'invalid-id']);
+        expect(invalidArrayRes.dismissed).toBe(false);
+    });
 });
 
