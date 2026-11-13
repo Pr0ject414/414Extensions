@@ -903,5 +903,101 @@ describe('XFriendsSyncManager', () => {
         const invalidArrayRes = await manager.dismissForcedTweet(['', 'invalid-id']);
         expect(invalidArrayRes.dismissed).toBe(false);
     });
+
+    test('pruneMySeenIds should preserve dismissedForcedIds and notifiedForcedIds for active friend-forced posts even when >200 or >1000 dismissals exist', async () => {
+        const manager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+        await manager.setIdentity('dana@example.com', 'Dana');
+
+        const now = Date.now();
+        manager.state.friends['alice@example.com'] = {
+            email: 'alice@example.com',
+            displayName: 'Alice',
+            status: 'connected',
+            addedAt: now - 10000
+        };
+
+        // Alice has 3 active forced tweets that Dana already dismissed earlier
+        const activeForcedIds = ['1850000000000002001', '1850000000000002002', '1850000000000002003'];
+        manager.state.friendForcedMap['alice@example.com'] = activeForcedIds.map((id, idx) => ({
+            id,
+            forcedAt: now - (3 - idx) * 60000
+        }));
+
+        for (const id of activeForcedIds) {
+            manager.dismissedForcedSet.add(id);
+            manager.notifiedForcedSet.add(id);
+        }
+
+        // Dana subsequently dismisses 1,100 other older/inactive tweets (well over both 200 and 1,000)
+        for (let i = 0; i < 1100; i++) {
+            const inactiveId = String(1840000000000000000n + BigInt(i));
+            manager.dismissedForcedSet.add(inactiveId);
+            manager.notifiedForcedSet.add(inactiveId);
+        }
+
+        manager.pruneMySeenIds();
+        manager.rebuildIndex();
+
+        // Active friend-forced IDs must NOT be evicted from dismissedForcedSet or notifiedForcedSet
+        for (const id of activeForcedIds) {
+            expect(manager.dismissedForcedSet.has(id)).toBe(true);
+            expect(manager.notifiedForcedSet.has(id)).toBe(true);
+        }
+        expect(manager.dismissedForcedSet.size).toBe(1000);
+        expect(manager.notifiedForcedSet.size).toBe(1000);
+
+        // Timeline must still treat them as dismissed
+        const timeline = manager.getFriendsTimelineData();
+        expect(timeline.unseenForcedPosts.length).toBe(0);
+    });
+
+    test('already-dismissed forced tweets should not reappear when a friend forces a new tweet over Nostr even after >1000 dismissals', async () => {
+        const aliceManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+        const bobManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+
+        await aliceManager.setIdentity('alice@example.com', 'Alice');
+        await aliceManager.addFriend('bob@example.com');
+
+        storageMap.clear();
+        await bobManager.setIdentity('bob@example.com', 'Bob');
+        await bobManager.acceptFriend('alice@example.com');
+        await aliceManager.syncWithRelays();
+        await bobManager.syncWithRelays();
+
+        // Alice forces 2 older tweets
+        await aliceManager.forceTweetToFriends('1850000000000003001', { text: 'Old forced 1' });
+        await aliceManager.forceTweetToFriends('1850000000000003002', { text: 'Old forced 2' });
+
+        await bobManager.syncWithRelays();
+        expect(bobManager.getFriendsTimelineData().unseenForcedPosts.map(p => p.tweetId)).toEqual(
+            expect.arrayContaining(['1850000000000003001', '1850000000000003002'])
+        );
+
+        // Bob dismisses both old forced tweets, then accumulates 1,100 other dismissals
+        await bobManager.dismissForcedTweet(['1850000000000003001', '1850000000000003002']);
+        for (let i = 0; i < 1100; i++) {
+            bobManager.dismissedForcedSet.add(String(1840000000000000000n + BigInt(i)));
+        }
+        await bobManager.saveState();
+
+        // Alice forces a brand-new tweet (her Nostr 414x-seen-v1 snapshot still includes 3001 & 3002 + 3003)
+        await aliceManager.forceTweetToFriends('1850000000000003003', { text: 'New forced 3' });
+
+        // Bob syncs with relays
+        await bobManager.syncWithRelays();
+
+        const unseenIds = bobManager.getFriendsTimelineData().unseenForcedPosts.map(p => p.tweetId);
+        expect(unseenIds).toEqual(['1850000000000003003']);
+        expect(bobManager.lastSyncNotifications.newForcedPosts.map(p => p.tweetId)).toEqual(['1850000000000003003']);
+    });
 });
 

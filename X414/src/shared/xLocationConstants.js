@@ -46,7 +46,8 @@ export const FRIEND_SYNC_CONFIG = {
     MAX_POST_META_ENTRIES: 25,   // Compact Nostr payload: forced posts + top 25 recent seen posts (<35KB)
     MAX_LOCAL_POST_META: 250,    // Local storage LRU cap of 250 post metadata entries
     MAX_TIMELINE_ITEMS: 300,     // Max merged timeline items returned over IPC per query
-    MAX_TOMBSTONE_ENTRIES: 200,  // Cap on unforcedMap, removedFriends, dismissedForcedIds, notifiedForcedIds
+    MAX_TOMBSTONE_ENTRIES: 200,  // Cap on unforcedMap, removedFriends, notifiedInviteEmails
+    MAX_DISMISSED_IDS: 1000,     // Cap on dismissedForcedIds & notifiedForcedIds (active friend-forced IDs are always preserved)
     MAX_AGE_MS: 14 * 24 * 60 * 60 * 1000, // 14-day TTL for forced posts, metadata & tombstones
     MAX_SEEN_AGE_MS: 7 * 24 * 60 * 60 * 1000, // 7-day TTL for seen post tracking
     RELAY_TIMEOUT_MS: 5000,

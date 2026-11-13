@@ -746,6 +746,7 @@ export class XFriendsSyncManager {
         const maxSeenCap = FRIEND_SYNC_CONFIG.MAX_SEEN_IDS || 1000;
         const maxForcedCap = FRIEND_SYNC_CONFIG.MAX_FORCED_IDS || 100;
         const maxTombstoneCap = FRIEND_SYNC_CONFIG.MAX_TOMBSTONE_ENTRIES || 200;
+        const maxDismissedCap = FRIEND_SYNC_CONFIG.MAX_DISMISSED_IDS || 1000;
 
         // 1. Cap mySeenIds (1,000 rolling window)
         const combinedSeen = new Set([
@@ -757,38 +758,7 @@ export class XFriendsSyncManager {
         this.state.mySeenIds = capped;
         this.mySeenSet = new Set(capped);
 
-        // 2. Cap dismissedForcedIds, notifiedForcedIds & notifiedInviteEmails
-        const combinedDismissed = new Set([
-            ...(Array.isArray(this.state.dismissedForcedIds) ? this.state.dismissedForcedIds : []),
-            ...(this.dismissedForcedSet instanceof Set ? Array.from(this.dismissedForcedSet) : [])
-        ]);
-        const validDismissed = Array.from(combinedDismissed)
-            .filter(id => this.isValidRecentTweetId(id))
-            .slice(-maxTombstoneCap);
-        this.state.dismissedForcedIds = validDismissed;
-        this.dismissedForcedSet = new Set(validDismissed);
-
-        const combinedNotifiedForced = new Set([
-            ...(Array.isArray(this.state.notifiedForcedIds) ? this.state.notifiedForcedIds : []),
-            ...(this.notifiedForcedSet instanceof Set ? Array.from(this.notifiedForcedSet) : [])
-        ]);
-        const validNotifiedForced = Array.from(combinedNotifiedForced)
-            .filter(id => this.isValidRecentTweetId(id))
-            .slice(-maxTombstoneCap);
-        this.state.notifiedForcedIds = validNotifiedForced;
-        this.notifiedForcedSet = new Set(validNotifiedForced);
-
-        const combinedNotifiedInvites = new Set([
-            ...(Array.isArray(this.state.notifiedInviteEmails) ? this.state.notifiedInviteEmails : []),
-            ...(this.notifiedInviteSet instanceof Set ? Array.from(this.notifiedInviteSet) : [])
-        ]);
-        const validNotifiedInvites = Array.from(combinedNotifiedInvites)
-            .filter(e => typeof e === 'string' && e.trim().length > 0)
-            .slice(-maxTombstoneCap);
-        this.state.notifiedInviteEmails = validNotifiedInvites;
-        this.notifiedInviteSet = new Set(validNotifiedInvites);
-
-        // 3. Prune & cap myForcedMap (14-day TTL + 100 cap)
+        // 2. Prune & cap myForcedMap (14-day TTL + 100 cap)
         if (this.state.myForcedMap && typeof this.state.myForcedMap === 'object') {
             const forcedEntries = Object.values(this.state.myForcedMap)
                 .filter(item => {
@@ -807,7 +777,7 @@ export class XFriendsSyncManager {
             this.state.myForcedMap = {};
         }
 
-        // 4. Prune & cap friendSeenMap and friendForcedMap per friend
+        // 3. Prune & cap friendSeenMap and friendForcedMap per friend (before dismissed/notified so active forced IDs are never evicted)
         if (this.state.friendSeenMap && typeof this.state.friendSeenMap === 'object') {
             for (const [fEmail, list] of Object.entries(this.state.friendSeenMap)) {
                 if (Array.isArray(list)) {
@@ -838,6 +808,45 @@ export class XFriendsSyncManager {
                 }
             }
         }
+
+        // 4. Cap dismissedForcedIds, notifiedForcedIds & notifiedInviteEmails
+        // Always preserve IDs still present in any friend's active friendForcedMap so dismissed posts never resurrect.
+        const capWithActivePriority = (stateArr, memSet) => {
+            const combined = new Set([
+                ...(Array.isArray(stateArr) ? stateArr : []),
+                ...(memSet instanceof Set ? Array.from(memSet) : [])
+            ]);
+            const inactive = [];
+            const active = [];
+            for (const id of combined) {
+                if (!this.isValidRecentTweetId(id)) continue;
+                if (activeFriendForcedIds.has(id)) {
+                    active.push(id);
+                } else {
+                    inactive.push(id);
+                }
+            }
+            const keepCount = Math.max(maxDismissedCap, active.length);
+            return [...inactive, ...active].slice(-keepCount);
+        };
+
+        const validDismissed = capWithActivePriority(this.state.dismissedForcedIds, this.dismissedForcedSet);
+        this.state.dismissedForcedIds = validDismissed;
+        this.dismissedForcedSet = new Set(validDismissed);
+
+        const validNotifiedForced = capWithActivePriority(this.state.notifiedForcedIds, this.notifiedForcedSet);
+        this.state.notifiedForcedIds = validNotifiedForced;
+        this.notifiedForcedSet = new Set(validNotifiedForced);
+
+        const combinedNotifiedInvites = new Set([
+            ...(Array.isArray(this.state.notifiedInviteEmails) ? this.state.notifiedInviteEmails : []),
+            ...(this.notifiedInviteSet instanceof Set ? Array.from(this.notifiedInviteSet) : [])
+        ]);
+        const validNotifiedInvites = Array.from(combinedNotifiedInvites)
+            .filter(e => typeof e === 'string' && e.trim().length > 0)
+            .slice(-maxTombstoneCap);
+        this.state.notifiedInviteEmails = validNotifiedInvites;
+        this.notifiedInviteSet = new Set(validNotifiedInvites);
 
         // 5. Prune & cap unforcedMap and removedFriends tombstones (14-day TTL + 200 cap)
         if (this.state.unforcedMap && typeof this.state.unforcedMap === 'object') {
@@ -1638,7 +1647,7 @@ export class XFriendsSyncManager {
             mySeenIds: Array.from(this.mySeenSet).slice(-FRIEND_SYNC_CONFIG.MAX_SEEN_IDS),
             myForcedMap: this.state.myForcedMap || {},
             unforcedMap: this.state.unforcedMap || {},
-            dismissedForcedIds: Array.from(this.dismissedForcedSet).slice(-(FRIEND_SYNC_CONFIG.MAX_DISMISSED_IDS || 500)),
+            dismissedForcedIds: Array.from(this.dismissedForcedSet),
             preferences,
             preferencesUpdatedAt
         };
