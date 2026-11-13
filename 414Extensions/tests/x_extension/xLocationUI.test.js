@@ -2878,5 +2878,126 @@ describe('xLocationUI.js', () => {
 
         jest.useRealTimers();
     });
+
+    test('renderForcedPostsInHomeFeed should not insert forced posts between a main tweet and its reply tweet(s)', () => {
+        const makeThreadCell = ({ top, bottom, hasTopLine = false, hasBottomLine = false }) => {
+            const cell = document.createElement('div');
+            cell.setAttribute('data-testid', 'cellInnerDiv');
+            cell.getBoundingClientRect = () => ({ top, bottom, left: 0, right: 600, width: 600, height: bottom - top });
+
+            const article = document.createElement('article');
+            article.setAttribute('data-testid', 'tweet');
+
+            const row = document.createElement('div');
+            const avatarCol = document.createElement('div');
+
+            if (hasTopLine) {
+                const topLine = document.createElement('div');
+                topLine.style.width = '2px';
+                topLine.style.backgroundColor = 'rgb(51, 54, 57)';
+                topLine.getBoundingClientRect = () => ({ top, bottom: top + 16, left: 20, right: 22, width: 2, height: 16 });
+                avatarCol.appendChild(topLine);
+            }
+
+            const avatar = document.createElement('div');
+            avatar.setAttribute('data-testid', 'Tweet-User-Avatar');
+            avatarCol.appendChild(avatar);
+
+            if (hasBottomLine) {
+                const bottomLine = document.createElement('div');
+                bottomLine.style.width = '2px';
+                bottomLine.style.backgroundColor = 'rgb(51, 54, 57)';
+                bottomLine.getBoundingClientRect = () => ({ top: top + 60, bottom, left: 20, right: 22, width: 2, height: Math.max(20, bottom - top - 60) });
+                avatarCol.appendChild(bottomLine);
+            }
+
+            const contentCol = document.createElement('div');
+            const userName = document.createElement('div');
+            userName.setAttribute('data-testid', 'User-Name');
+            contentCol.appendChild(userName);
+
+            row.appendChild(avatarCol);
+            row.appendChild(contentCol);
+            article.appendChild(row);
+            cell.appendChild(article);
+            return cell;
+        };
+
+        const forcedPost = {
+            tweetId: '2200000000000000777',
+            isForced: true,
+            forcedBy: ['Alice'],
+            seenBy: ['Alice'],
+            forcedByMe: false,
+            isSeenByMe: false,
+            isDismissed: false,
+            meta: {
+                id: '2200000000000000777',
+                text: 'Forced post should never split a thread',
+                authorHandle: 'alice',
+                authorName: 'Alice'
+            }
+        };
+
+        // Case 1: Main tweet is visible (top: 200, bottom: 820) and its reply1 -> reply2 are below fold (top >= 820, viewportHeight = 800)
+        const section = document.createElement('section');
+        const timelineOuter = document.createElement('div');
+        timelineOuter.setAttribute('aria-label', 'Timeline: Your Home Timeline');
+        const spacer = document.createElement('div');
+
+        const standaloneCell = makeThreadCell({ top: 50, bottom: 199 });
+        const mainTweetCell = makeThreadCell({ top: 200, bottom: 820, hasBottomLine: true });
+        const reply1Cell = makeThreadCell({ top: 820, bottom: 1020, hasTopLine: true, hasBottomLine: true });
+        const reply2Cell = makeThreadCell({ top: 1020, bottom: 1220, hasTopLine: true, hasBottomLine: false });
+
+        spacer.appendChild(standaloneCell);
+        spacer.appendChild(mainTweetCell);
+        spacer.appendChild(reply1Cell);
+        spacer.appendChild(reply2Cell);
+        timelineOuter.appendChild(spacer);
+        section.appendChild(timelineOuter);
+        document.body.appendChild(section);
+
+        const banner1 = window.XLocationUI.renderForcedPostsInHomeFeed(section, [forcedPost], {});
+        expect(banner1).not.toBeNull();
+        expect(mainTweetCell.contains(banner1)).toBe(false);
+        expect(reply1Cell.contains(banner1)).toBe(false);
+        expect(banner1.parentNode).toBe(reply2Cell);
+
+        // Case 2: Main tweet has downward connector, reply not yet mounted in DOM -> falls back to earlier standalone cell
+        if (banner1.parentNode) banner1.parentNode.removeChild(banner1);
+        reply1Cell.remove();
+        reply2Cell.remove();
+
+        const banner2 = window.XLocationUI.renderForcedPostsInHomeFeed(section, [forcedPost], {});
+        expect(banner2).not.toBeNull();
+        expect(mainTweetCell.contains(banner2)).toBe(false);
+        expect(banner2.parentNode).toBe(standaloneCell);
+
+        // Case 3: Non-virtualized timeline with direct article children (main tweet + reply tweet)
+        if (banner2.parentNode) banner2.parentNode.removeChild(banner2);
+        section.remove();
+
+        const flatFeed = document.createElement('section');
+        const flatMain = makeThreadCell({ top: 100, bottom: 820, hasBottomLine: true }).querySelector('article');
+        flatMain.getBoundingClientRect = () => ({ top: 100, bottom: 820, left: 0, right: 600, width: 600, height: 720 });
+        const flatReply = makeThreadCell({ top: 820, bottom: 1020, hasTopLine: true }).querySelector('article');
+        flatReply.getBoundingClientRect = () => ({ top: 820, bottom: 1020, left: 0, right: 600, width: 600, height: 200 });
+        const flatNext = makeThreadCell({ top: 1020, bottom: 1220 }).querySelector('article');
+        flatNext.getBoundingClientRect = () => ({ top: 1020, bottom: 1220, left: 0, right: 600, width: 600, height: 200 });
+
+        flatFeed.appendChild(flatMain);
+        flatFeed.appendChild(flatReply);
+        flatFeed.appendChild(flatNext);
+        document.body.appendChild(flatFeed);
+
+        const banner3 = window.XLocationUI.renderForcedPostsInHomeFeed(flatFeed, [forcedPost], {});
+        expect(banner3).not.toBeNull();
+        const flatChildren = Array.from(flatFeed.children);
+        expect(flatChildren[0]).toBe(flatMain);
+        expect(flatChildren[1]).toBe(flatReply);
+        expect(flatChildren[2]).toBe(banner3);
+        expect(flatChildren[3]).toBe(flatNext);
+    });
 });
 

@@ -1970,6 +1970,140 @@
         return lastVisible;
     }
 
+    function isVerticalThreadLine(el) {
+        if (!el || el.nodeType !== 1) return false;
+        const style = el.style || {};
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            return false;
+        }
+        const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+        if (rect && rect.width > 0 && rect.width <= 4 && rect.height >= 8) {
+            return true;
+        }
+        let cs = null;
+        try {
+            cs = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function'
+                ? window.getComputedStyle(el)
+                : null;
+        } catch (e) {}
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')) {
+            return false;
+        }
+        const widthStr = style.width || (cs ? cs.width : '');
+        const bgStr = style.backgroundColor || style.background || (cs ? cs.backgroundColor : '');
+        if (/^[1-4]px$/.test(String(widthStr).trim())) {
+            if (!bgStr || (bgStr !== 'transparent' && bgStr !== 'rgba(0, 0, 0, 0)')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function getTweetAvatarAndColumn(cellOrArticle) {
+        if (!cellOrArticle || !cellOrArticle.querySelector) return null;
+        const article = (cellOrArticle.matches && cellOrArticle.matches('article[data-testid="tweet"]'))
+            ? cellOrArticle
+            : cellOrArticle.querySelector('article[data-testid="tweet"]:not(.x-friend-tweet-card)');
+        if (!article) return null;
+        const avatar = article.querySelector('[data-testid="Tweet-User-Avatar"]');
+        if (!avatar) return null;
+        let avatarCol = avatar.parentElement;
+        while (
+            avatarCol &&
+            avatarCol !== article &&
+            avatarCol.parentElement &&
+            avatarCol.parentElement !== article &&
+            !avatarCol.parentElement.querySelector('[data-testid="User-Name"], [data-testid="tweetText"]')
+        ) {
+            avatarCol = avatarCol.parentElement;
+        }
+        return { avatar, avatarCol: avatarCol || avatar.parentElement || article };
+    }
+
+    function hasThreadConnector(cellOrArticle, direction) {
+        const info = getTweetAvatarAndColumn(cellOrArticle);
+        if (!info || !info.avatarCol || !info.avatarCol.querySelectorAll) return false;
+        const { avatar, avatarCol } = info;
+        const flag = direction === 'above' ? 2 : 4; // Node.DOCUMENT_POSITION_PRECEDING : Node.DOCUMENT_POSITION_FOLLOWING
+        const divs = avatarCol.querySelectorAll('div');
+        for (let i = 0; i < divs.length; i++) {
+            const div = divs[i];
+            if (div === avatar || avatar.contains(div) || div.contains(avatar)) continue;
+            if (typeof avatar.compareDocumentPosition === 'function' && (avatar.compareDocumentPosition(div) & flag) === 0) {
+                continue;
+            }
+            if (isVerticalThreadLine(div)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function hasDividerCellBetween(cellA, cellB, allCells) {
+        if (!Array.isArray(allCells) || allCells.length === 0) return false;
+        const idxA = allCells.indexOf(cellA);
+        const idxB = allCells.indexOf(cellB);
+        if (idxA === -1 || idxB <= idxA + 1) return false;
+        for (let k = idxA + 1; k < idxB; k++) {
+            const mid = allCells[k];
+            if (!mid) continue;
+            if (mid.querySelector && mid.querySelector('article[data-testid="tweet"]')) continue;
+            const rect = typeof mid.getBoundingClientRect === 'function' ? mid.getBoundingClientRect() : null;
+            const text = (mid.textContent || '').trim();
+            if ((!text && (!rect || rect.height <= 4)) || (!text && !mid.querySelector('a, button'))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isThreadConnectedToNext(cellA, cellB, allCells) {
+        if (!cellA) return false;
+        if (hasThreadConnector(cellA, 'below')) return true;
+        if (cellB && !hasDividerCellBetween(cellA, cellB, allCells) && hasThreadConnector(cellB, 'above')) {
+            return true;
+        }
+        return false;
+    }
+
+    function resolveThreadSafeTargetCell(nativeTweetCells, allCells, viewportHeight) {
+        let lastVisibleIndex = -1;
+        const visibleIndices = [];
+        for (let i = 0; i < nativeTweetCells.length; i++) {
+            const cell = nativeTweetCells[i];
+            const rect = typeof cell.getBoundingClientRect === 'function' ? cell.getBoundingClientRect() : null;
+            if (rect && rect.height > 0 && rect.bottom > 0 && rect.top < viewportHeight) {
+                lastVisibleIndex = i;
+                visibleIndices.push(i);
+            }
+        }
+
+        let targetIndex = lastVisibleIndex >= 0 ? lastVisibleIndex : 0;
+        while (
+            targetIndex < nativeTweetCells.length - 1 &&
+            isThreadConnectedToNext(nativeTweetCells[targetIndex], nativeTweetCells[targetIndex + 1], allCells)
+        ) {
+            targetIndex++;
+        }
+
+        // If the final DOM tweet cell itself still has a downward thread connector (reply not mounted yet),
+        // prefer an earlier visible standalone cell so we don't split the main tweet from its incoming reply.
+        if (
+            targetIndex === nativeTweetCells.length - 1 &&
+            hasThreadConnector(nativeTweetCells[targetIndex], 'below')
+        ) {
+            for (let j = visibleIndices.length - 1; j >= 0; j--) {
+                const candidateIdx = visibleIndices[j];
+                if (!isThreadConnectedToNext(nativeTweetCells[candidateIdx], nativeTweetCells[candidateIdx + 1], allCells)) {
+                    return nativeTweetCells[candidateIdx];
+                }
+            }
+            return null;
+        }
+
+        return nativeTweetCells[targetIndex] || nativeTweetCells[0];
+    }
+
     function renderForcedPostsInHomeFeed(timelineContainer, unseenForcedPosts = [], callbacks = {}) {
         if (!timelineContainer) return null;
 
@@ -2052,16 +2186,9 @@
                 const viewportHeight = (typeof window !== 'undefined' && window.innerHeight) ||
                     (typeof document !== 'undefined' && document.documentElement && document.documentElement.clientHeight) ||
                     800;
-                let targetCell = null;
-                for (let i = 0; i < nativeTweetCells.length; i++) {
-                    const cell = nativeTweetCells[i];
-                    const rect = typeof cell.getBoundingClientRect === 'function' ? cell.getBoundingClientRect() : null;
-                    if (rect && rect.height > 0 && rect.bottom > 0 && rect.top < viewportHeight) {
-                        targetCell = cell;
-                    }
-                }
+                const targetCell = resolveThreadSafeTargetCell(nativeTweetCells, allCells, viewportHeight);
                 if (!targetCell) {
-                    targetCell = nativeTweetCells[0];
+                    return null;
                 }
                 targetCell.appendChild(container);
                 container._xWasMountedInCell = true;
@@ -2078,7 +2205,14 @@
                 return null;
             }
             if (container.parentNode !== timelineContainer) {
-                const lastVisibleNative = getLastVisibleChild(timelineContainer, container);
+                let lastVisibleNative = getLastVisibleChild(timelineContainer, container);
+                while (
+                    lastVisibleNative &&
+                    lastVisibleNative.nextElementSibling &&
+                    isThreadConnectedToNext(lastVisibleNative, lastVisibleNative.nextElementSibling, null)
+                ) {
+                    lastVisibleNative = lastVisibleNative.nextElementSibling;
+                }
                 if (lastVisibleNative) {
                     timelineContainer.insertBefore(container, lastVisibleNative.nextSibling);
                 } else {
