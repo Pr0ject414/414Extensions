@@ -797,8 +797,11 @@
 
     const MAX_COLLAPSES_PER_SCROLL_WINDOW = 6;
     const SCROLL_WINDOW_RESET_PX = 250;
+    const COLLAPSE_WINDOW_RESET_MS = 600;
     const COLLAPSE_MAX_VIEWPORT_TOP_RATIO = 1.1;
+    const MAX_IN_VIEWPORT_DEFER_RETRIES = 10;
     let lastCollapseWindowScrollY = 0;
+    let lastCollapseWindowTime = 0;
     let collapsesInScrollWindow = 0;
     let isUserActivelyScrolling = false;
     let scrollIdleCollapseTimer = null;
@@ -873,18 +876,39 @@
             }
         }
 
-        // 3. Cap total height collapses per scroll window so collapsing cells in a stationary feed
-        // cannot domino-cascade through an entire batch without substantial user scroll movement.
-        const currentScrollY = (typeof window !== 'undefined' && (window.scrollY || window.pageYOffset || 0)) || 0;
-        if (Math.abs(currentScrollY - lastCollapseWindowScrollY) >= SCROLL_WINDOW_RESET_PX) {
-            lastCollapseWindowScrollY = currentScrollY;
-            collapsesInScrollWindow = 0;
-        }
+        // 3. Cap total height collapses per scroll/time window so collapsing cells in a stationary feed
+        // cannot domino-cascade through an entire batch synchronously.
+        maybeResetCollapseWindow();
         if (collapsesInScrollWindow >= MAX_COLLAPSES_PER_SCROLL_WINDOW) {
             return false;
         }
 
         return true;
+    }
+
+    function maybeResetCollapseWindow() {
+        const currentScrollY = (typeof window !== 'undefined' && (window.scrollY || window.pageYOffset || 0)) || 0;
+        const now = Date.now();
+        if (
+            Math.abs(currentScrollY - lastCollapseWindowScrollY) >= SCROLL_WINDOW_RESET_PX ||
+            (lastCollapseWindowTime > 0 && (now - lastCollapseWindowTime) >= COLLAPSE_WINDOW_RESET_MS)
+        ) {
+            lastCollapseWindowScrollY = currentScrollY;
+            lastCollapseWindowTime = now;
+            collapsesInScrollWindow = 0;
+        } else if (lastCollapseWindowTime === 0) {
+            lastCollapseWindowTime = now;
+        }
+    }
+
+    function isElementInCollapseViewportRange(el) {
+        if (!el || typeof el.getBoundingClientRect !== 'function') return false;
+        const rect = el.getBoundingClientRect();
+        if (!rect || rect.height <= 0) return false;
+        const viewportHeight = (typeof window !== 'undefined' && window.innerHeight) ||
+            (typeof document !== 'undefined' && document.documentElement && document.documentElement.clientHeight) ||
+            800;
+        return rect.bottom > 0 && rect.top >= -40 && rect.top < viewportHeight * COLLAPSE_MAX_VIEWPORT_TOP_RATIO;
     }
 
     function recordViewportCollapse(el) {
@@ -893,11 +917,7 @@
         if (!rect || (rect.width === 0 && rect.height === 0 && rect.top === 0 && rect.bottom === 0)) {
             return;
         }
-        const currentScrollY = (typeof window !== 'undefined' && (window.scrollY || window.pageYOffset || 0)) || 0;
-        if (Math.abs(currentScrollY - lastCollapseWindowScrollY) >= SCROLL_WINDOW_RESET_PX) {
-            lastCollapseWindowScrollY = currentScrollY;
-            collapsesInScrollWindow = 0;
-        }
+        maybeResetCollapseWindow();
         collapsesInScrollWindow++;
     }
 
@@ -994,18 +1014,25 @@
             }
 
             if (!article._xDeferredAdCollapse && !article._xDeferredFilter && !article._xHasDeferredChildFilter) {
+                delete article._xDeferredRetryCount;
                 pendingDeferredArticles.delete(article);
                 unobserveDeferredCollapseArticle(article);
+            } else if (!isUserActivelyScrolling && isElementInCollapseViewportRange(article)) {
+                const retries = article._xDeferredRetryCount || 0;
+                if (retries < MAX_IN_VIEWPORT_DEFER_RETRIES) {
+                    article._xDeferredRetryCount = retries + 1;
+                    scheduleDeferredViewportFlush(200);
+                }
             }
         }
     }
 
-    function scheduleDeferredViewportFlush() {
+    function scheduleDeferredViewportFlush(delayMs = 50) {
         if (deferredFlushTimer || pendingDeferredArticles.size === 0) return;
         deferredFlushTimer = setTimeout(() => {
             deferredFlushTimer = null;
             flushDeferredViewportCollapses();
-        }, 50);
+        }, delayMs);
     }
 
     function ensureCollapseIntersectionObserver() {
@@ -1044,7 +1071,7 @@
             } catch (e) {}
         }
         const cell = article.closest ? article.closest('[data-testid="cellInnerDiv"]') : null;
-        if (cell && cell.style && cell.style.opacity === '0') {
+        if ((cell && cell.style && cell.style.opacity === '0') || (!isUserActivelyScrolling && isElementInCollapseViewportRange(article))) {
             scheduleDeferredViewportFlush();
         }
     }
@@ -2125,11 +2152,7 @@
         scrollIdleCollapseTimer = setTimeout(() => {
             scrollIdleCollapseTimer = null;
             isUserActivelyScrolling = false;
-            const currentScrollY = typeof window.scrollY === 'number' ? window.scrollY : (window.pageYOffset || 0);
-            if (Math.abs(currentScrollY - lastCollapseWindowScrollY) >= SCROLL_WINDOW_RESET_PX) {
-                lastCollapseWindowScrollY = currentScrollY;
-                collapsesInScrollWindow = 0;
-            }
+            maybeResetCollapseWindow();
             if (pendingDeferredArticles.size > 0) {
                 scheduleDeferredViewportFlush();
             }

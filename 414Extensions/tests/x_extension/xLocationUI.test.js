@@ -2782,5 +2782,101 @@ describe('xLocationUI.js', () => {
 
         jest.useRealTimers();
     });
+
+    test('xObserver flushes visible in-viewport blocked replies deferred by collapse-window cap or transient layout overlap without requiring scroll', () => {
+        jest.useFakeTimers();
+        delete window.XObserverInjected;
+        Object.defineProperty(window, 'innerHeight', { value: 900, configurable: true, writable: true });
+
+        global.chrome = {
+            runtime: {
+                id: 'test-ext-id',
+                lastError: null,
+                onMessage: { addListener: jest.fn() },
+                sendMessage: jest.fn((msg, cb) => {
+                    if (cb) cb({ success: true, timelinePosts: [], unseenForcedPosts: [], connectedFriends: [] });
+                })
+            },
+            storage: {
+                local: {
+                    get: jest.fn((keys, cb) => {
+                        const cache = {};
+                        for (let i = 0; i < 8; i++) {
+                            cache[`blocked_reply_${i}`] = {
+                                screenName: `blocked_reply_${i}`,
+                                location: 'India',
+                                device: 'Android'
+                            };
+                        }
+                        cb({
+                            isGlobalMasterSwitchEnabled: true,
+                            isXModuleEnabled: true,
+                            isXLocationEnabled: true,
+                            isXHideAdsEnabled: true,
+                            isXFriendsSyncEnabled: false,
+                            blockedCountries: ['India'],
+                            blockedDeviceRegions: [],
+                            blockedNameFlags: [],
+                            x_location_cache_v4: cache
+                        });
+                    })
+                },
+                onChanged: { addListener: jest.fn() }
+            }
+        };
+
+        const timeline = document.createElement('div');
+        const cells = [];
+        const articles = [];
+        for (let i = 0; i < 8; i++) {
+            const cell = document.createElement('div');
+            cell.setAttribute('data-testid', 'cellInnerDiv');
+            // Cell 7 initially overlaps Cell 6's translateY (transient VirtualScroller layout race with opacity !== '0')
+            const y = i === 7 ? 600 : i * 100;
+            cell.style.transform = `translateY(${y}px)`;
+            const getRect = () => ({ top: y, bottom: y + 80, left: 0, right: 600, width: 600, height: 80 });
+            cell.getBoundingClientRect = getRect;
+
+            const article = document.createElement('article');
+            article.setAttribute('data-testid', 'tweet');
+            article.getBoundingClientRect = getRect;
+            const header = document.createElement('div');
+            header.setAttribute('data-testid', 'User-Name');
+            header.textContent = `@blocked_reply_${i}`;
+            article.appendChild(header);
+            cell.appendChild(article);
+            timeline.appendChild(cell);
+            cells.push(cell);
+            articles.push(article);
+        }
+        document.body.appendChild(timeline);
+
+        const observerScriptPath = path.resolve(__dirname, '../../x_extension/content_scripts/xObserver.js');
+        const observerScriptContent = fs.readFileSync(observerScriptPath, 'utf8');
+        eval(observerScriptContent);
+
+        jest.advanceTimersByTime(100);
+
+        // First 6 visible replies collapse immediately
+        for (let i = 0; i < 6; i++) {
+            expect(articles[i].style.display).toBe('none');
+        }
+        // 7th hit MAX_COLLAPSES_PER_SCROLL_WINDOW (6) and 8th also had transient translateY overlap
+        expect(articles[6].style.display).toBe('');
+        expect(articles[6]._xDeferredFilter).toBeDefined();
+
+        // Fix transient VirtualScroller translateY for Cell 7 without any user scroll
+        cells[7].style.transform = 'translateY(700px)';
+
+        // Advance timers past COLLAPSE_WINDOW_RESET_MS (600ms) + retry flush
+        jest.advanceTimersByTime(900);
+
+        expect(articles[6].style.display).toBe('none');
+        expect(articles[7].style.display).toBe('none');
+        expect(cells[6].querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+        expect(cells[7].querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+
+        jest.useRealTimers();
+    });
 });
 
