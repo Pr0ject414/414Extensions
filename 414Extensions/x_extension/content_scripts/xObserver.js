@@ -822,6 +822,39 @@
         return null;
     }
 
+    function isAboveViewportCollapseCutoff(rect, viewportHeight) {
+        if (rect.bottom <= 0) return true;
+        const height = rect.height > 0 ? rect.height : Math.max(0, rect.bottom - rect.top);
+        const maxScrolledPastTop = Math.max(40, Math.min(height * 0.5, viewportHeight * 0.6));
+        return rect.top < -maxScrolledPastTop;
+    }
+
+    function isZeroHeightSiblingCell(prev) {
+        if (!prev) return false;
+        if (prev.style && (prev.style.height === '0px' || prev.style.display === 'none')) {
+            return true;
+        }
+        if (prev.firstElementChild && prev.firstElementChild.style && prev.firstElementChild.style.height === '0px') {
+            return true;
+        }
+        if (typeof prev.getBoundingClientRect === 'function') {
+            const pRect = prev.getBoundingClientRect();
+            if (pRect) {
+                if (pRect.width > 0 && pRect.height <= 1) {
+                    return true;
+                }
+                if (pRect.width === 0 && pRect.height === 0 && typeof getComputedStyle === 'function') {
+                    try {
+                        if (getComputedStyle(prev).display === 'none') {
+                            return true;
+                        }
+                    } catch (e) {}
+                }
+            }
+        }
+        return false;
+    }
+
     function isElementReadyForViewportCollapse(el) {
         if (!el || typeof el.getBoundingClientRect !== 'function') return true;
         if (isUserActivelyScrolling) return false;
@@ -839,9 +872,9 @@
             (typeof document !== 'undefined' && document.documentElement && document.documentElement.clientHeight) ||
             800;
 
-        // 1. Never collapse elements scrolled above the viewport (prevents upward scroll jumps)
+        // 1. Never collapse elements scrolled mostly/fully above the viewport (prevents upward scroll jumps)
         // or elements deep in X's bottom overscan buffer (prevents shrinking offscreen overscan cells).
-        if (rect.bottom <= 0 || rect.top < -40 || rect.top >= viewportHeight * COLLAPSE_MAX_VIEWPORT_TOP_RATIO) {
+        if (isAboveViewportCollapseCutoff(rect, viewportHeight) || rect.top >= viewportHeight * COLLAPSE_MAX_VIEWPORT_TOP_RATIO) {
             return false;
         }
 
@@ -854,21 +887,16 @@
             }
             const prev = cell.previousElementSibling;
             if (prev && prev.getAttribute && prev.getAttribute('data-testid') === 'cellInnerDiv') {
-                const prevCollapsedZero = Boolean(
-                    prev.firstElementChild &&
-                    prev.firstElementChild.style &&
-                    prev.firstElementChild.style.height === '0px'
-                );
-                if (!prevCollapsedZero) {
+                if (!isZeroHeightSiblingCell(prev)) {
                     const cellY = parseCellTranslateY(cell);
                     const prevY = parseCellTranslateY(prev);
                     if (cellY !== null && prevY !== null) {
-                        if (cellY <= prevY + 1) {
+                        if (Math.abs(cellY - prevY) <= 1) {
                             return false;
                         }
                     } else if (typeof prev.getBoundingClientRect === 'function') {
                         const pRect = prev.getBoundingClientRect();
-                        if (pRect && pRect.height > 0 && rect.top <= pRect.top + 1) {
+                        if (pRect && pRect.height > 1 && Math.abs(rect.top - pRect.top) <= 1) {
                             return false;
                         }
                     }
@@ -908,7 +936,7 @@
         const viewportHeight = (typeof window !== 'undefined' && window.innerHeight) ||
             (typeof document !== 'undefined' && document.documentElement && document.documentElement.clientHeight) ||
             800;
-        return rect.bottom > 0 && rect.top >= -40 && rect.top < viewportHeight * COLLAPSE_MAX_VIEWPORT_TOP_RATIO;
+        return !isAboveViewportCollapseCutoff(rect, viewportHeight) && rect.top < viewportHeight * COLLAPSE_MAX_VIEWPORT_TOP_RATIO;
     }
 
     function recordViewportCollapse(el) {
@@ -1121,10 +1149,38 @@
         });
     }
 
+    function extractCanonicalArticleStatusKey(article) {
+        if (!article) return '';
+        let statusLink = null;
+        if (typeof article.querySelectorAll === 'function') {
+            const timeEl = typeof article.querySelector === 'function' ? article.querySelector('time') : null;
+            if (timeEl && typeof timeEl.closest === 'function') {
+                const timeLink = timeEl.closest('a[href*="/status/"]');
+                if (timeLink) {
+                    statusLink = timeLink;
+                }
+            }
+            if (!statusLink) {
+                const links = article.querySelectorAll('a[href*="/status/"]');
+                if (links && links.length > 0) {
+                    statusLink = links[0];
+                }
+            }
+        } else if (typeof article.querySelector === 'function') {
+            statusLink = article.querySelector('a[href*="/status/"]');
+        }
+        const rawHref = statusLink && typeof statusLink.getAttribute === 'function'
+            ? (statusLink.getAttribute('href') || '')
+            : '';
+        if (!rawHref) return '';
+        return rawHref
+            .replace(/^https?:\/\/[^/]+/i, '')
+            .replace(/(\/status\/[^/?#]+).*$/, '$1');
+    }
+
     function resetRecycledArticleIfNeeded(article) {
         if (!article) return;
-        const statusLink = article.querySelector ? article.querySelector('a[href*="/status/"]') : null;
-        const currentHref = statusLink ? (statusLink.getAttribute('href') || '') : '';
+        const currentHref = extractCanonicalArticleStatusKey(article);
         if (currentHref && article._xLastAdCheckHref !== undefined && article._xLastAdCheckHref !== currentHref) {
             delete article._xIsAdChecked;
             delete article._xWrapperRestoreChecked;
@@ -1136,6 +1192,17 @@
             delete article._xHasDeferredChildFilter;
             pendingDeferredArticles.delete(article);
             unobserveDeferredCollapseArticle(article);
+            if (typeof article.querySelectorAll === 'function') {
+                const userHeaders = article.querySelectorAll('[data-testid="User-Name"], [data-testid="UserName"]');
+                for (let i = 0; i < userHeaders.length; i++) {
+                    const uh = userHeaders[i];
+                    processedElements.delete(uh);
+                    inflightElements.delete(uh);
+                    delete uh._xProcessedScreenName;
+                    delete uh._xLastProcessedText;
+                    delete uh._xInflightText;
+                }
+            }
             if (article.dataset) {
                 delete article.dataset.xTweetId;
                 delete article.dataset.xFilterRevealed;
@@ -1889,8 +1956,9 @@
                             window.XLocationUI.renderInlineBadge(w.elem, userData);
                         }
                         w.elem._xLastProcessedText = w.elem.textContent || '';
-                        if (w.filterTarget && activeSettings) {
-                            applyTweetFilterForElement(w.filterTarget, userData, activeSettings, w.elem);
+                        const effSettings = activeSettings || w.settings;
+                        if (w.filterTarget && effSettings) {
+                            applyTweetFilterForElement(w.filterTarget, userData, effSettings, w.elem);
                         }
                     }
                 }
@@ -1943,16 +2011,20 @@
     function processUserElement(elem, settings, shouldHideAds) {
         if (!elem || !isContextValid()) return;
 
-        const currentText = elem.textContent || '';
-        if (processedElements.has(elem) && elem._xLastProcessedText === currentText) {
-            return;
-        }
-        if (inflightElements.has(elem) && elem._xInflightText === currentText) {
+        const enclosingArticle = elem.closest ? elem.closest('article[data-testid="tweet"]') : null;
+        const isEnclosingAd = enclosingArticle ? checkIsAdTweet(enclosingArticle) : false;
+        if (enclosingArticle && (enclosingArticle._xAdCollapsed || (shouldHideAds && isEnclosingAd))) {
             return;
         }
 
-        const enclosingArticle = elem.closest ? elem.closest('article[data-testid="tweet"]') : null;
-        if (enclosingArticle && (enclosingArticle._xAdCollapsed || (shouldHideAds && checkIsAdTweet(enclosingArticle)))) {
+        const filterTarget = getFilterTargetForUserElement(elem);
+        const needsFilterAttachment = Boolean(filterTarget && !filterTarget._xPrimaryLocationData);
+
+        const currentText = elem.textContent || '';
+        if (processedElements.has(elem) && elem._xLastProcessedText === currentText && !needsFilterAttachment) {
+            return;
+        }
+        if (inflightElements.has(elem) && elem._xInflightText === currentText) {
             return;
         }
 
@@ -1961,7 +2033,7 @@
         const screenNameLower = screenName.toLowerCase();
 
         if (processedElements.has(elem)) {
-            if (elem._xProcessedScreenName === screenNameLower) {
+            if (elem._xProcessedScreenName === screenNameLower && !needsFilterAttachment) {
                 elem._xLastProcessedText = currentText;
                 return;
             }
@@ -1969,7 +2041,6 @@
             inflightElements.delete(elem);
         }
 
-        const filterTarget = getFilterTargetForUserElement(elem);
         if (filterTarget && elem._xProcessedScreenName && elem._xProcessedScreenName !== screenNameLower) {
             delete filterTarget._xPrimaryLocationData;
             delete filterTarget._xDeferredFilter;
@@ -2012,11 +2083,11 @@
         elem._xInflightText = currentText;
         const existingWaiters = inflightScreenNames.get(screenNameLower);
         if (existingWaiters) {
-            existingWaiters.push({ elem, filterTarget });
+            existingWaiters.push({ elem, filterTarget, settings });
             return;
         }
 
-        const waiters = [{ elem, filterTarget }];
+        const waiters = [{ elem, filterTarget, settings }];
         inflightScreenNames.set(screenNameLower, waiters);
 
         try {

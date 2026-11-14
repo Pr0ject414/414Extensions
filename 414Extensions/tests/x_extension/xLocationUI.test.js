@@ -2999,5 +2999,340 @@ describe('xLocationUI.js', () => {
         expect(flatChildren[2]).toBe(banner3);
         expect(flatChildren[3]).toBe(flatNext);
     });
+
+    function createObserverTestEnv({ blockedCountries = ['India'], locationByUser = {} } = {}) {
+        const observerEntriesByTarget = new Map();
+        const observerInstances = [];
+        const origIntersectionObserver = global.IntersectionObserver;
+        const origInnerHeight = Object.getOwnPropertyDescriptor(window, 'innerHeight');
+
+        Object.defineProperty(window, 'innerHeight', { configurable: true, writable: true, value: 800 });
+
+        class MockIntersectionObserver {
+            constructor(callback, options = {}) {
+                this.callback = callback;
+                this.options = options;
+                this.targets = new Set();
+                observerInstances.push(this);
+            }
+            observe(target) {
+                this.targets.add(target);
+                observerEntriesByTarget.set(target, this);
+            }
+            unobserve(target) {
+                this.targets.delete(target);
+            }
+            disconnect() {
+                this.targets.clear();
+            }
+            trigger(target, isIntersecting = true) {
+                if (!this.targets.has(target)) return;
+                this.callback([{ target, isIntersecting, intersectionRatio: isIntersecting ? 0.5 : 0 }], this);
+            }
+        }
+        global.IntersectionObserver = MockIntersectionObserver;
+        window.IntersectionObserver = MockIntersectionObserver;
+
+        const settings = {
+            isGlobalMasterSwitchEnabled: true,
+            isXModuleEnabled: true,
+            isXLocationEnabled: true,
+            isXHideAdsEnabled: true,
+            isXFriendsSyncEnabled: false,
+            blockedCountries,
+            blockedDeviceRegions: [],
+            blockedNameFlags: []
+        };
+
+        const defaultLoc = {
+            screenName: 'nikmlnkr',
+            location: 'India',
+            device: 'India Android App'
+        };
+
+        const sendMessageMock = jest.fn((msg, cb) => {
+            if (!cb) return;
+            if (msg.action === 'X_FETCH_USER_INFO') {
+                const key = (msg.payload?.screenName || '').toLowerCase();
+                cb({ success: true, data: locationByUser[key] || { ...defaultLoc, screenName: key || 'nikmlnkr' } });
+            } else if (msg.action === 'X_GET_SETTINGS') {
+                cb({ success: true, settings });
+            } else {
+                cb({ success: true, seenMap: {}, forcedMap: {}, myForcedIds: [] });
+            }
+        });
+
+        global.chrome = {
+            runtime: {
+                id: 'test-ext-id',
+                lastError: null,
+                onMessage: { addListener: jest.fn() },
+                sendMessage: sendMessageMock
+            },
+            storage: {
+                local: {
+                    get: jest.fn((keys, cb) => cb(settings))
+                },
+                onChanged: { addListener: jest.fn() }
+            }
+        };
+
+        const primaryCol = document.createElement('div');
+        primaryCol.setAttribute('data-testid', 'primaryColumn');
+        const timeline = document.createElement('div');
+        timeline.setAttribute('aria-label', 'Timeline: Your Home Timeline');
+        const spacer = document.createElement('div');
+        timeline.appendChild(spacer);
+        primaryCol.appendChild(timeline);
+        document.body.appendChild(primaryCol);
+
+        const loadObserver = () => {
+            delete window.XObserverInjected;
+            const observerScriptPath = path.resolve(__dirname, '../../x_extension/content_scripts/xObserver.js');
+            const observerScriptContent = fs.readFileSync(observerScriptPath, 'utf8');
+            eval(observerScriptContent);
+        };
+
+        const triggerAllIntersections = (isIntersecting = true) => {
+            for (const inst of observerInstances) {
+                for (const t of Array.from(inst.targets)) {
+                    inst.trigger(t, isIntersecting);
+                }
+            }
+        };
+
+        const cleanup = () => {
+            jest.useRealTimers();
+            delete window.XObserverInjected;
+            global.IntersectionObserver = origIntersectionObserver;
+            window.IntersectionObserver = origIntersectionObserver;
+            if (origInnerHeight) {
+                Object.defineProperty(window, 'innerHeight', origInnerHeight);
+            } else {
+                delete window.innerHeight;
+            }
+            document.body.innerHTML = '';
+        };
+
+        return { spacer, loadObserver, triggerAllIntersections, cleanup };
+    }
+
+    function buildVirtualTweetCell({ screenName = 'nikmlnkr', statusId = '2121470973593710940', translateY = null, rect = null, text = 'Sample game video post' } = {}) {
+        const cell = document.createElement('div');
+        cell.setAttribute('data-testid', 'cellInnerDiv');
+        if (translateY !== null) {
+            cell.style.transform = `translateY(${translateY}px)`;
+        }
+
+        const article = document.createElement('article');
+        article.setAttribute('data-testid', 'tweet');
+        if (rect) {
+            article.getBoundingClientRect = () => ({ left: 0, right: rect.width ?? 600, width: rect.width ?? 600, ...rect });
+            cell.getBoundingClientRect = () => ({ left: 0, right: rect.width ?? 600, width: rect.width ?? 600, ...rect });
+        }
+
+        const userName = document.createElement('div');
+        userName.setAttribute('data-testid', 'User-Name');
+        const displayLink = document.createElement('a');
+        displayLink.setAttribute('href', `/${screenName}`);
+        displayLink.textContent = screenName;
+        const handleLink = document.createElement('a');
+        handleLink.setAttribute('href', `/${screenName}`);
+        handleLink.textContent = `@${screenName}`;
+        userName.appendChild(displayLink);
+        userName.appendChild(handleLink);
+
+        const statusLink = document.createElement('a');
+        statusLink.setAttribute('href', `/${screenName}/status/${statusId}`);
+        const timeEl = document.createElement('time');
+        timeEl.setAttribute('datetime', '2026-11-14T05:11:09.000Z');
+        timeEl.textContent = '51m';
+        statusLink.appendChild(timeEl);
+
+        const tweetText = document.createElement('div');
+        tweetText.setAttribute('data-testid', 'tweetText');
+        const textSpan = document.createElement('span');
+        textSpan.textContent = text;
+        tweetText.appendChild(textSpan);
+
+        article.appendChild(userName);
+        article.appendChild(statusLink);
+        article.appendChild(tweetText);
+        cell.appendChild(article);
+
+        return { cell, article, userName, statusLink, timeEl, tweetText };
+    }
+
+    async function flushObserverCycles(steps = 3, ms = 400) {
+        for (let i = 0; i < steps; i++) {
+            await Promise.resolve();
+            jest.advanceTimersByTime(ms);
+        }
+    }
+
+    test('xObserver collapses tall partially-scrolled-past media tweets after scroll idle while deferring mostly scrolled-past tweets', async () => {
+        jest.useFakeTimers();
+        const env = createObserverTestEnv();
+
+        try {
+            const moderatelyScrolled = buildVirtualTweetCell({
+                statusId: '2121470973593710941',
+                translateY: 0,
+                rect: { top: -60, bottom: 420, width: 600, height: 480 }
+            });
+            const halfVisibleMedia = buildVirtualTweetCell({
+                statusId: '2121470973593710942',
+                translateY: 500,
+                rect: { top: -180, bottom: 300, width: 600, height: 480 }
+            });
+            const mostlyScrolledPast = buildVirtualTweetCell({
+                statusId: '2121470973593710943',
+                translateY: 1000,
+                rect: { top: -390, bottom: 60, width: 600, height: 450 }
+            });
+
+            env.spacer.appendChild(moderatelyScrolled.cell);
+            env.spacer.appendChild(halfVisibleMedia.cell);
+            env.spacer.appendChild(mostlyScrolledPast.cell);
+
+            env.loadObserver();
+            window.dispatchEvent(new Event('scroll'));
+            await flushObserverCycles(2, 150);
+
+            // Advance past scroll idle and trigger intersection dwell; advance further to reset collapse window if capped
+            jest.advanceTimersByTime(600);
+            env.triggerAllIntersections(true);
+            await flushObserverCycles(4, 700);
+
+            expect(moderatelyScrolled.article.classList.contains('x-tweet-blocked')).toBe(true);
+            expect(moderatelyScrolled.article.style.display).toBe('none');
+            expect(moderatelyScrolled.cell.querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+
+            expect(halfVisibleMedia.article.classList.contains('x-tweet-blocked')).toBe(true);
+            expect(halfVisibleMedia.article.style.display).toBe('none');
+            expect(halfVisibleMedia.cell.querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+
+            // ~87% scrolled past (only 60px of 450px remains) must remain deferred to avoid upward jump
+            expect(mostlyScrolledPast.article.classList.contains('x-tweet-blocked')).toBe(false);
+            expect(mostlyScrolledPast.article.style.display).not.toBe('none');
+            expect(mostlyScrolledPast.cell.querySelector('.x-tweet-filtered-placeholder')).toBeNull();
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    test('xObserver collapses blocked tweets after native 0px sibling cells and out-of-order translateY siblings while deferring genuinely stacked cells', async () => {
+        jest.useFakeTimers();
+        const env = createObserverTestEnv();
+
+        try {
+            // 1. Native 0px sibling cell sharing translateY(600px) with the target tweet
+            const nativeZeroSibling = document.createElement('div');
+            nativeZeroSibling.setAttribute('data-testid', 'cellInnerDiv');
+            nativeZeroSibling.style.transform = 'translateY(600px)';
+            nativeZeroSibling.getBoundingClientRect = () => ({ top: 600, bottom: 600, left: 0, right: 600, width: 600, height: 0 });
+
+            const afterZeroCell = buildVirtualTweetCell({
+                statusId: '2121470973593710951',
+                translateY: 600,
+                rect: { top: 200, bottom: 520, width: 600, height: 320 }
+            });
+
+            // 2. Out-of-order recycled previous sibling at translateY(900px) before target at translateY(400px)
+            const outOfOrderPrev = buildVirtualTweetCell({
+                screenName: 'safeuser',
+                statusId: '2121470973593710952',
+                translateY: 900,
+                rect: { top: 500, bottom: 750, width: 600, height: 250 }
+            });
+            const recycledTargetAfterOutOfOrder = buildVirtualTweetCell({
+                statusId: '2121470973593710953',
+                translateY: 400,
+                rect: { top: 150, bottom: 450, width: 600, height: 300 }
+            });
+
+            // 3. Genuinely stacked non-zero sibling cells both at translateY(1200px) must still defer
+            const unmeasuredPrev = buildVirtualTweetCell({
+                screenName: 'safeuser',
+                statusId: '2121470973593710954',
+                translateY: 1200,
+                rect: { top: 150, bottom: 400, width: 600, height: 250 }
+            });
+            const stackedTarget = buildVirtualTweetCell({
+                statusId: '2121470973593710955',
+                translateY: 1200,
+                rect: { top: 150, bottom: 450, width: 600, height: 300 }
+            });
+
+            env.spacer.appendChild(nativeZeroSibling);
+            env.spacer.appendChild(afterZeroCell.cell);
+            env.spacer.appendChild(outOfOrderPrev.cell);
+            env.spacer.appendChild(recycledTargetAfterOutOfOrder.cell);
+            env.spacer.appendChild(unmeasuredPrev.cell);
+            env.spacer.appendChild(stackedTarget.cell);
+
+            env.loadObserver();
+            await flushObserverCycles(2, 400);
+            env.triggerAllIntersections(true);
+            await flushObserverCycles(4, 700);
+
+            expect(afterZeroCell.article.classList.contains('x-tweet-blocked')).toBe(true);
+            expect(afterZeroCell.article.style.display).toBe('none');
+            expect(afterZeroCell.cell.querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+
+            expect(recycledTargetAfterOutOfOrder.article.classList.contains('x-tweet-blocked')).toBe(true);
+            expect(recycledTargetAfterOutOfOrder.article.style.display).toBe('none');
+            expect(recycledTargetAfterOutOfOrder.cell.querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+
+            expect(stackedTarget.article.classList.contains('x-tweet-blocked')).toBe(false);
+            expect(stackedTarget.article.style.display).not.toBe('none');
+        } finally {
+            env.cleanup();
+        }
+    });
+
+    test('xObserver re-filters an in-place recycled article when the status href changes even for the same author and reused User-Name element', async () => {
+        jest.useFakeTimers();
+        const env = createObserverTestEnv();
+
+        try {
+            const recycled = buildVirtualTweetCell({
+                screenName: 'nikmlnkr',
+                statusId: '1111111111',
+                translateY: 0,
+                rect: { top: 120, bottom: 480, width: 600, height: 360 },
+                text: 'First post by author'
+            });
+            env.spacer.appendChild(recycled.cell);
+
+            env.loadObserver();
+            await flushObserverCycles(2, 400);
+            env.triggerAllIntersections(true);
+            await flushObserverCycles(3, 700);
+
+            expect(recycled.article.classList.contains('x-tweet-blocked')).toBe(true);
+            expect(recycled.article.style.display).toBe('none');
+            expect(recycled.cell.querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+
+            // Simulate X VirtualScroller recycling the same <article> and same User-Name node
+            // to a new status URL by the same blocked author
+            recycled.statusLink.setAttribute('href', '/nikmlnkr/status/2121470973593710940');
+            recycled.timeEl.textContent = '51m';
+            const newSpan = document.createElement('span');
+            newSpan.textContent = 'Having a lot of fun working on this game';
+            recycled.tweetText.replaceChildren(newSpan);
+
+            await flushObserverCycles(3, 700);
+            env.triggerAllIntersections(true);
+            await flushObserverCycles(3, 700);
+
+            expect(recycled.article.classList.contains('x-tweet-blocked')).toBe(true);
+            expect(recycled.article.style.display).toBe('none');
+            expect(recycled.cell.querySelector('.x-tweet-filtered-placeholder')).not.toBeNull();
+            expect(recycled.userName.querySelectorAll('.x-location-inline-badge').length).toBe(1);
+        } finally {
+            env.cleanup();
+        }
+    });
 });
 
