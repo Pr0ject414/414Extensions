@@ -67,7 +67,7 @@ export class XFriendsSyncManager {
         this.inflightHydrations = new Map();
         this.failedHydrationUntil = new Map();
         this.snowflakeTimeCache = new Map();
-        this.lastSyncNotifications = { newInvites: [], newForcedPosts: [] };
+        this.lastSyncNotifications = { newInvites: [], newForcedPosts: [], newForceComments: [] };
 
         this.state = {
             identity: null, // { email, displayName, passphrase, privKeyHex, pubkeyHex, seenFeedKeyHex, identityCreatedAt }
@@ -79,8 +79,13 @@ export class XFriendsSyncManager {
             myForcedMap: {},   // { [tweetId]: { id, forcedAt } }
             unforcedMap: {},   // { [tweetId]: unforcedAtMs }
             friendForcedMap: {}, // { [email]: Array<{ id, forcedAt }> }
+            myForcedCommentsMap: {}, // { [tweetId]: Array<{ id, text, createdAt }> }
+            deletedCommentsMap: {},  // { [commentId]: deletedAtMs }
+            friendCommentsMap: {},   // { [email]: { [tweetId]: Array<{ id, text, createdAt }> } }
             dismissedForcedIds: [], // string[]
             notifiedForcedIds: [],  // string[]
+            dismissedCommentIds: [], // string[]
+            notifiedCommentIds: [],  // string[]
             notifiedInviteEmails: [], // string[]
             preferencesUpdatedAt: 0,
             lastKnownPrefsJson: '',
@@ -91,9 +96,12 @@ export class XFriendsSyncManager {
         this.mySeenSet = new Set();
         this.dismissedForcedSet = new Set();
         this.notifiedForcedSet = new Set();
+        this.dismissedCommentSet = new Set();
+        this.notifiedCommentSet = new Set();
         this.notifiedInviteSet = new Set();
         this.tweetToFriendsMap = new Map(); // tweetId -> string[] of friend labels
         this.tweetToForcedByMap = new Map(); // tweetId -> Array<{ label, email, forcedAt }>
+        this.tweetToCommentsMap = new Map(); // tweetId -> Array<{ id, tweetId, text, createdAt, authorEmail, authorName, authorLabel, isMe }>
         this.wsPool = new Map();            // relayUrl -> pooled connection entry
         this.relayCooldownUntil = new Map(); // relayUrl -> timestamp ms
         this.relayFailureCounts = new Map(); // relayUrl -> consecutive failure count
@@ -117,8 +125,13 @@ export class XFriendsSyncManager {
                 this.state.myForcedMap = (loaded.myForcedMap && typeof loaded.myForcedMap === 'object') ? loaded.myForcedMap : {};
                 this.state.unforcedMap = (loaded.unforcedMap && typeof loaded.unforcedMap === 'object') ? loaded.unforcedMap : {};
                 this.state.friendForcedMap = (loaded.friendForcedMap && typeof loaded.friendForcedMap === 'object') ? loaded.friendForcedMap : {};
+                this.state.myForcedCommentsMap = (loaded.myForcedCommentsMap && typeof loaded.myForcedCommentsMap === 'object') ? loaded.myForcedCommentsMap : {};
+                this.state.deletedCommentsMap = (loaded.deletedCommentsMap && typeof loaded.deletedCommentsMap === 'object') ? loaded.deletedCommentsMap : {};
+                this.state.friendCommentsMap = (loaded.friendCommentsMap && typeof loaded.friendCommentsMap === 'object') ? loaded.friendCommentsMap : {};
                 this.state.dismissedForcedIds = Array.isArray(loaded.dismissedForcedIds) ? loaded.dismissedForcedIds : [];
                 this.state.notifiedForcedIds = Array.isArray(loaded.notifiedForcedIds) ? loaded.notifiedForcedIds : [];
+                this.state.dismissedCommentIds = Array.isArray(loaded.dismissedCommentIds) ? loaded.dismissedCommentIds : [];
+                this.state.notifiedCommentIds = Array.isArray(loaded.notifiedCommentIds) ? loaded.notifiedCommentIds : [];
                 this.state.notifiedInviteEmails = Array.isArray(loaded.notifiedInviteEmails) ? loaded.notifiedInviteEmails : [];
                 this.state.hasUnpublishedSeen = Boolean(loaded.hasUnpublishedSeen);
                 this.state.preferencesUpdatedAt = Number(loaded.preferencesUpdatedAt) || 0;
@@ -187,6 +200,8 @@ export class XFriendsSyncManager {
             this.state.mySeenIds = Array.from(this.mySeenSet);
             this.state.dismissedForcedIds = Array.from(this.dismissedForcedSet);
             this.state.notifiedForcedIds = Array.from(this.notifiedForcedSet);
+            this.state.dismissedCommentIds = Array.from(this.dismissedCommentSet);
+            this.state.notifiedCommentIds = Array.from(this.notifiedCommentSet);
             this.state.notifiedInviteEmails = Array.from(this.notifiedInviteSet);
             this.syncRelayHealthToState();
             this.relayHealthDirty = false;
@@ -249,6 +264,22 @@ export class XFriendsSyncManager {
         const videoMatch = noQuery.match(/\/(?:ext_tw_video|amplify_video|tweet_video)\/(\d+)/);
         if (videoMatch && videoMatch[1]) return `video:${videoMatch[1]}`;
         return noQuery.replace(/\.(jpg|jpeg|png|webp|gif|mp4)$/i, '');
+    }
+
+    sanitizeForceCommentText(rawText) {
+        if (typeof rawText !== 'string') return '';
+        const maxLen = FRIEND_SYNC_CONFIG.MAX_COMMENT_LENGTH || 500;
+        return rawText.trim().slice(0, maxLen);
+    }
+
+    sanitizeForceCommentEntry(raw, fallbackTime = Date.now()) {
+        if (!raw || typeof raw !== 'object') return null;
+        const id = String(raw.id || '').trim().slice(0, 80);
+        const text = this.sanitizeForceCommentText(raw.text);
+        if (!id || !text) return null;
+        const rawTime = Number(raw.createdAt);
+        const createdAt = (Number.isFinite(rawTime) && rawTime > 0) ? rawTime : (Number(fallbackTime) || Date.now());
+        return { id, text, createdAt };
     }
 
     sanitizeTweetMeta(tweetId, rawMeta) {
@@ -746,6 +777,8 @@ export class XFriendsSyncManager {
         const maxAgeMs = FRIEND_SYNC_CONFIG.MAX_AGE_MS || (14 * 24 * 60 * 60 * 1000);
         const maxSeenCap = FRIEND_SYNC_CONFIG.MAX_SEEN_IDS || 1000;
         const maxForcedCap = FRIEND_SYNC_CONFIG.MAX_FORCED_IDS || 100;
+        const maxCommentsPerTweet = FRIEND_SYNC_CONFIG.MAX_COMMENTS_PER_TWEET || 25;
+        const maxTotalMyComments = FRIEND_SYNC_CONFIG.MAX_TOTAL_MY_COMMENTS || 200;
         const maxTombstoneCap = FRIEND_SYNC_CONFIG.MAX_TOMBSTONE_ENTRIES || 200;
         const maxDismissedCap = FRIEND_SYNC_CONFIG.MAX_DISMISSED_IDS || 1000;
 
@@ -810,9 +843,114 @@ export class XFriendsSyncManager {
             }
         }
 
-        // 4. Cap dismissedForcedIds, notifiedForcedIds & notifiedInviteEmails
-        // Always preserve IDs still present in any friend's active friendForcedMap so dismissed posts never resurrect.
-        const capWithActivePriority = (stateArr, memSet) => {
+        const activeForcedCircleIds = new Set([
+            ...Object.keys(this.state.myForcedMap || {}),
+            ...activeFriendForcedIds
+        ]);
+
+        // 3b. Prune & cap deletedCommentsMap, myForcedCommentsMap, and friendCommentsMap
+        if (this.state.deletedCommentsMap && typeof this.state.deletedCommentsMap === 'object') {
+            const deletedEntries = Object.entries(this.state.deletedCommentsMap)
+                .filter(([cid, ts]) => {
+                    if (!cid) return false;
+                    const t = Number(ts) || 0;
+                    return !(t > 0 && t <= now && (now - t) > maxAgeMs);
+                })
+                .sort((a, b) => (Number(a[1]) || 0) - (Number(b[1]) || 0))
+                .slice(-maxTombstoneCap);
+            this.state.deletedCommentsMap = Object.fromEntries(deletedEntries);
+        } else {
+            this.state.deletedCommentsMap = {};
+        }
+
+        const nextMyComments = {};
+        const flatMyComments = [];
+        if (this.state.myForcedCommentsMap && typeof this.state.myForcedCommentsMap === 'object') {
+            for (const [rawTid, rawList] of Object.entries(this.state.myForcedCommentsMap)) {
+                const tid = String(rawTid || '').trim();
+                if (!this.isValidRecentTweetId(tid) || !Array.isArray(rawList)) continue;
+                const isPinnedForced = activeForcedCircleIds.has(tid);
+                const byId = new Map();
+                for (const rawC of rawList) {
+                    const cleanC = this.sanitizeForceCommentEntry(rawC, now);
+                    if (!cleanC) continue;
+                    if (this.state.deletedCommentsMap[cleanC.id]) continue;
+                    if (!isPinnedForced && cleanC.createdAt > 0 && cleanC.createdAt <= now && (now - cleanC.createdAt) > maxAgeMs) {
+                        continue;
+                    }
+                    const prev = byId.get(cleanC.id);
+                    if (!prev || cleanC.createdAt >= prev.createdAt) {
+                        byId.set(cleanC.id, cleanC);
+                    }
+                }
+                const sorted = Array.from(byId.values())
+                    .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)))
+                    .slice(-maxCommentsPerTweet);
+                for (const entry of sorted) {
+                    flatMyComments.push({ tid, entry });
+                }
+            }
+        }
+        if (flatMyComments.length > maxTotalMyComments) {
+            flatMyComments.sort((a, b) => (a.entry.createdAt || 0) - (b.entry.createdAt || 0));
+            const keptFlat = flatMyComments.slice(-maxTotalMyComments);
+            for (const { tid, entry } of keptFlat) {
+                if (!nextMyComments[tid]) nextMyComments[tid] = [];
+                nextMyComments[tid].push(entry);
+            }
+        } else {
+            for (const { tid, entry } of flatMyComments) {
+                if (!nextMyComments[tid]) nextMyComments[tid] = [];
+                nextMyComments[tid].push(entry);
+            }
+        }
+        for (const tid of Object.keys(nextMyComments)) {
+            nextMyComments[tid].sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)));
+        }
+        this.state.myForcedCommentsMap = nextMyComments;
+
+        const activeFriendCommentIds = new Set();
+        if (this.state.friendCommentsMap && typeof this.state.friendCommentsMap === 'object') {
+            const cleanedFriendComments = {};
+            for (const [fEmail, tweetMap] of Object.entries(this.state.friendCommentsMap)) {
+                if (!tweetMap || typeof tweetMap !== 'object') continue;
+                const cleanedTweetMap = {};
+                for (const [rawTid, rawList] of Object.entries(tweetMap)) {
+                    const tid = String(rawTid || '').trim();
+                    if (!this.isValidRecentTweetId(tid) || !Array.isArray(rawList)) continue;
+                    const isPinnedForced = activeForcedCircleIds.has(tid);
+                    const byId = new Map();
+                    for (const rawC of rawList) {
+                        const cleanC = this.sanitizeForceCommentEntry(rawC, now);
+                        if (!cleanC) continue;
+                        if (!isPinnedForced && cleanC.createdAt > 0 && cleanC.createdAt <= now && (now - cleanC.createdAt) > maxAgeMs) {
+                            continue;
+                        }
+                        const prev = byId.get(cleanC.id);
+                        if (!prev || cleanC.createdAt >= prev.createdAt) {
+                            byId.set(cleanC.id, cleanC);
+                        }
+                    }
+                    const sorted = Array.from(byId.values())
+                        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)))
+                        .slice(-maxCommentsPerTweet);
+                    if (sorted.length > 0) {
+                        cleanedTweetMap[tid] = sorted;
+                        for (const entry of sorted) {
+                            activeFriendCommentIds.add(entry.id);
+                        }
+                    }
+                }
+                cleanedFriendComments[fEmail] = cleanedTweetMap;
+            }
+            this.state.friendCommentsMap = cleanedFriendComments;
+        } else {
+            this.state.friendCommentsMap = {};
+        }
+
+        // 4. Cap dismissedForcedIds, notifiedForcedIds, dismissedCommentIds, notifiedCommentIds & notifiedInviteEmails
+        // Always preserve IDs still present in any friend's active friendForcedMap / friendCommentsMap so dismissed items never resurrect.
+        const capWithActivePriority = (stateArr, memSet, activeSet = activeFriendForcedIds, validateFn = (id) => this.isValidRecentTweetId(id)) => {
             const combined = new Set([
                 ...(Array.isArray(stateArr) ? stateArr : []),
                 ...(memSet instanceof Set ? Array.from(memSet) : [])
@@ -820,8 +958,8 @@ export class XFriendsSyncManager {
             const inactive = [];
             const active = [];
             for (const id of combined) {
-                if (!this.isValidRecentTweetId(id)) continue;
-                if (activeFriendForcedIds.has(id)) {
+                if (!validateFn(id)) continue;
+                if (activeSet.has(id)) {
                     active.push(id);
                 } else {
                     inactive.push(id);
@@ -838,6 +976,15 @@ export class XFriendsSyncManager {
         const validNotifiedForced = capWithActivePriority(this.state.notifiedForcedIds, this.notifiedForcedSet);
         this.state.notifiedForcedIds = validNotifiedForced;
         this.notifiedForcedSet = new Set(validNotifiedForced);
+
+        const isValidCommentId = (cid) => typeof cid === 'string' && cid.trim().length > 0;
+        const validDismissedComments = capWithActivePriority(this.state.dismissedCommentIds, this.dismissedCommentSet, activeFriendCommentIds, isValidCommentId);
+        this.state.dismissedCommentIds = validDismissedComments;
+        this.dismissedCommentSet = new Set(validDismissedComments);
+
+        const validNotifiedComments = capWithActivePriority(this.state.notifiedCommentIds, this.notifiedCommentSet, activeFriendCommentIds, isValidCommentId);
+        this.state.notifiedCommentIds = validNotifiedComments;
+        this.notifiedCommentSet = new Set(validNotifiedComments);
 
         const combinedNotifiedInvites = new Set([
             ...(Array.isArray(this.state.notifiedInviteEmails) ? this.state.notifiedInviteEmails : []),
@@ -911,6 +1058,7 @@ export class XFriendsSyncManager {
     rebuildIndex() {
         this.tweetToFriendsMap.clear();
         this.tweetToForcedByMap.clear();
+        this.tweetToCommentsMap.clear();
 
         for (const [email, friend] of Object.entries(this.state.friends)) {
             if (friend.status !== 'connected') continue;
@@ -954,6 +1102,90 @@ export class XFriendsSyncManager {
                 }
             }
         }
+
+        // Build chronological comment threads strictly scoped to posts in our active forced circle
+        const activeForcedCircleIds = new Set([
+            ...Object.keys(this.state.myForcedMap || {}),
+            ...this.tweetToForcedByMap.keys()
+        ]);
+        const myEmail = this.state.identity?.email || 'me';
+        const myDisplayName = this.state.identity?.displayName;
+        const myLabel = myDisplayName ? `${myDisplayName} (You)` : 'You';
+
+        for (const tweetId of activeForcedCircleIds) {
+            const byId = new Map();
+            const myList = (this.state.myForcedCommentsMap && Array.isArray(this.state.myForcedCommentsMap[tweetId]))
+                ? this.state.myForcedCommentsMap[tweetId]
+                : [];
+            for (const rawC of myList) {
+                const cleanC = this.sanitizeForceCommentEntry(rawC);
+                if (!cleanC || (this.state.deletedCommentsMap && this.state.deletedCommentsMap[cleanC.id])) continue;
+                byId.set(cleanC.id, {
+                    id: cleanC.id,
+                    tweetId,
+                    text: cleanC.text,
+                    createdAt: cleanC.createdAt,
+                    authorEmail: myEmail,
+                    authorName: 'You',
+                    authorLabel: myLabel,
+                    isMe: true
+                });
+            }
+
+            for (const [email, friend] of Object.entries(this.state.friends)) {
+                if (friend.status !== 'connected') continue;
+                const fList = this.state.friendCommentsMap?.[email]?.[tweetId];
+                if (!Array.isArray(fList)) continue;
+                const fDisplay = friend.displayName || email;
+                const fLabel = friend.displayName && friend.displayName !== email
+                    ? `${friend.displayName} (${email})`
+                    : email;
+                for (const rawC of fList) {
+                    const cleanC = this.sanitizeForceCommentEntry(rawC);
+                    if (!cleanC) continue;
+                    const existing = byId.get(cleanC.id);
+                    if (!existing || cleanC.createdAt >= existing.createdAt) {
+                        byId.set(cleanC.id, {
+                            id: cleanC.id,
+                            tweetId,
+                            text: cleanC.text,
+                            createdAt: cleanC.createdAt,
+                            authorEmail: email,
+                            authorName: fDisplay,
+                            authorLabel: fLabel,
+                            isMe: false
+                        });
+                    }
+                }
+            }
+
+            if (byId.size > 0) {
+                const sorted = Array.from(byId.values()).sort(
+                    (a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id))
+                );
+                this.tweetToCommentsMap.set(tweetId, sorted);
+            }
+        }
+    }
+
+    getCommentsForTweet(tweetId) {
+        const id = String(tweetId || '').trim();
+        return id ? (this.tweetToCommentsMap.get(id) || []) : [];
+    }
+
+    dismissCommentsForTweet(tweetId) {
+        const id = String(tweetId || '').trim();
+        if (!id) return [];
+        const comments = this.tweetToCommentsMap.get(id) || [];
+        const dismissedIds = [];
+        for (const c of comments) {
+            if (!c.isMe && c.id) {
+                this.dismissedCommentSet.add(c.id);
+                this.notifiedCommentSet.add(c.id);
+                dismissedIds.push(c.id);
+            }
+        }
+        return dismissedIds;
     }
 
     getPublicState() {
@@ -1102,6 +1334,9 @@ export class XFriendsSyncManager {
         delete this.state.friends[normFriend];
         delete this.state.friendSeenMap[normFriend];
         delete this.state.friendForcedMap[normFriend];
+        if (this.state.friendCommentsMap) {
+            delete this.state.friendCommentsMap[normFriend];
+        }
         this.rebuildIndex();
 
         if (wasConnected && this.state.identity) {
@@ -1193,6 +1428,7 @@ export class XFriendsSyncManager {
 
         this.state.hasUnpublishedSeen = true;
         this.pruneMySeenIds();
+        this.rebuildIndex();
         await this.saveState();
         this.broadcastSeenUpdateToTabs();
 
@@ -1206,20 +1442,42 @@ export class XFriendsSyncManager {
         return {
             forced: true,
             tweetId: id,
-            totalForced: Object.keys(this.state.myForcedMap).length
+            totalForced: Object.keys(this.state.myForcedMap).length,
+            comments: this.getCommentsForTweet(id)
         };
     }
 
     async unforceTweet(tweetId) {
         await this.init();
         const id = String(tweetId || '').trim();
-        if (!id) return { forced: false, tweetId: id };
+        if (!id) return { forced: false, tweetId: id, comments: [] };
 
-        if (this.state.myForcedMap && this.state.myForcedMap[id]) {
-            delete this.state.myForcedMap[id];
-            if (!this.state.unforcedMap) this.state.unforcedMap = {};
-            this.state.unforcedMap[id] = Date.now();
+        const hadForced = Boolean(this.state.myForcedMap && this.state.myForcedMap[id]);
+        const hadMyComments = Boolean(
+            this.state.myForcedCommentsMap &&
+            Array.isArray(this.state.myForcedCommentsMap[id]) &&
+            this.state.myForcedCommentsMap[id].length > 0
+        );
+
+        if (hadForced || hadMyComments) {
+            const now = Date.now();
+            if (hadForced) {
+                delete this.state.myForcedMap[id];
+                if (!this.state.unforcedMap) this.state.unforcedMap = {};
+                this.state.unforcedMap[id] = now;
+            }
+            if (hadMyComments) {
+                if (!this.state.deletedCommentsMap) this.state.deletedCommentsMap = {};
+                for (const c of this.state.myForcedCommentsMap[id]) {
+                    if (c && c.id) {
+                        this.state.deletedCommentsMap[c.id] = now;
+                    }
+                }
+                delete this.state.myForcedCommentsMap[id];
+            }
             this.state.hasUnpublishedSeen = true;
+            this.pruneMySeenIds();
+            this.rebuildIndex();
             await this.saveState();
             this.broadcastSeenUpdateToTabs();
 
@@ -1234,7 +1492,125 @@ export class XFriendsSyncManager {
         return {
             forced: false,
             tweetId: id,
-            totalForced: Object.keys(this.state.myForcedMap || {}).length
+            totalForced: Object.keys(this.state.myForcedMap || {}).length,
+            comments: this.getCommentsForTweet(id)
+        };
+    }
+
+    async addForceComment(tweetId, text, meta = null) {
+        await this.init();
+        const id = String(tweetId || '').trim();
+        if (!this.isValidRecentTweetId(id)) {
+            throw new Error('Invalid tweet ID.');
+        }
+        const cleanText = this.sanitizeForceCommentText(text);
+        if (!cleanText) {
+            throw new Error('Comment cannot be empty.');
+        }
+
+        const isForcedInCircle = Boolean(
+            (this.state.myForcedMap && this.state.myForcedMap[id]) ||
+            this.tweetToForcedByMap.has(id)
+        );
+        if (!isForcedInCircle) {
+            throw new Error('Post must be forced before commenting.');
+        }
+
+        const now = Date.now();
+        this.mySeenSet.add(id);
+        if (meta && typeof meta === 'object') {
+            const sanitized = this.sanitizeTweetMeta(id, { ...meta, updatedAt: now });
+            if (sanitized) {
+                this.state.postMetaMap[id] = sanitized;
+            }
+        }
+
+        if (!this.state.myForcedCommentsMap || typeof this.state.myForcedCommentsMap !== 'object') {
+            this.state.myForcedCommentsMap = {};
+        }
+        if (!Array.isArray(this.state.myForcedCommentsMap[id])) {
+            this.state.myForcedCommentsMap[id] = [];
+        }
+
+        const commentEntry = {
+            id: `c_${now}_${generateRandomBytesHex(4)}`,
+            text: cleanText,
+            createdAt: now
+        };
+        this.state.myForcedCommentsMap[id].push(commentEntry);
+
+        this.state.hasUnpublishedSeen = true;
+        this.pruneMySeenIds();
+        this.rebuildIndex();
+        await this.saveState();
+        this.broadcastSeenUpdateToTabs();
+
+        if (this.flushTimeout) {
+            clearTimeout(this.flushTimeout);
+            this.flushTimeout = null;
+        }
+        await this.publishMySeenSnapshot().catch(() => {});
+        this.broadcastSeenUpdateToTabs();
+
+        const comments = this.getCommentsForTweet(id);
+        const enriched = comments.find(c => c.id === commentEntry.id) || {
+            ...commentEntry,
+            tweetId: id,
+            authorEmail: this.state.identity?.email || 'me',
+            authorName: 'You',
+            authorLabel: 'You',
+            isMe: true
+        };
+        return {
+            tweetId: id,
+            comment: enriched,
+            comments
+        };
+    }
+
+    async deleteForceComment(tweetId, commentId) {
+        await this.init();
+        const id = String(tweetId || '').trim();
+        const cid = String(commentId || '').trim();
+        if (!this.isValidRecentTweetId(id) || !cid) {
+            return { deleted: false, tweetId: id, commentId: cid, comments: this.getCommentsForTweet(id) };
+        }
+
+        const list = this.state.myForcedCommentsMap && Array.isArray(this.state.myForcedCommentsMap[id])
+            ? this.state.myForcedCommentsMap[id]
+            : [];
+        const nextList = list.filter(c => c && c.id !== cid);
+        const didRemove = nextList.length !== list.length;
+
+        if (didRemove) {
+            if (nextList.length > 0) {
+                this.state.myForcedCommentsMap[id] = nextList;
+            } else {
+                delete this.state.myForcedCommentsMap[id];
+            }
+            if (!this.state.deletedCommentsMap || typeof this.state.deletedCommentsMap !== 'object') {
+                this.state.deletedCommentsMap = {};
+            }
+            this.state.deletedCommentsMap[cid] = Date.now();
+            this.state.hasUnpublishedSeen = true;
+            this.pruneMySeenIds();
+            this.rebuildIndex();
+            await this.saveState();
+            this.broadcastSeenUpdateToTabs();
+
+            if (this.flushTimeout) {
+                clearTimeout(this.flushTimeout);
+                this.flushTimeout = null;
+            }
+            await this.publishMySeenSnapshot().catch(() => {});
+            this.broadcastSeenUpdateToTabs();
+        }
+
+        return {
+            deleted: didRemove,
+            tweetId: id,
+            commentId: cid,
+            comments: this.getCommentsForTweet(id)
         };
     }
 
@@ -1243,15 +1619,20 @@ export class XFriendsSyncManager {
         if (Array.isArray(tweetId)) {
             const validIds = tweetId.map(id => String(id || '').trim()).filter(id => this.isValidRecentTweetId(id));
             if (validIds.length === 0) return { dismissed: false };
+            const dismissedCommentIdsMap = {};
             for (const id of validIds) {
                 this.dismissedForcedSet.add(id);
                 this.mySeenSet.add(id);
+                const cIds = this.dismissCommentsForTweet(id);
+                if (cIds.length > 0) {
+                    dismissedCommentIdsMap[id] = cIds;
+                }
             }
             this.state.hasUnpublishedSeen = true;
             this.scheduleSnapshotFlush();
             await this.saveState();
-            this.broadcastDismissUpdateToTabs(validIds);
-            return { dismissed: true, tweetId: validIds[0], tweetIds: validIds };
+            this.broadcastDismissUpdateToTabs(validIds, dismissedCommentIdsMap);
+            return { dismissed: true, tweetId: validIds[0], tweetIds: validIds, dismissedCommentIdsMap };
         }
 
         const id = String(tweetId || '').trim();
@@ -1259,12 +1640,14 @@ export class XFriendsSyncManager {
 
         this.dismissedForcedSet.add(id);
         this.mySeenSet.add(id);
+        const dismissedCommentIds = this.dismissCommentsForTweet(id);
+        const dismissedCommentIdsMap = dismissedCommentIds.length > 0 ? { [id]: dismissedCommentIds } : {};
         this.state.hasUnpublishedSeen = true;
         this.scheduleSnapshotFlush();
         await this.saveState();
-        this.broadcastDismissUpdateToTabs(id);
+        this.broadcastDismissUpdateToTabs(id, dismissedCommentIdsMap);
 
-        return { dismissed: true, tweetId: id };
+        return { dismissed: true, tweetId: id, dismissedCommentIds };
     }
 
     checkTweetsSeen(tweetIds) {
@@ -1282,11 +1665,12 @@ export class XFriendsSyncManager {
 
     checkTweetsSyncStatus(tweetIds) {
         if (!Array.isArray(tweetIds) || tweetIds.length === 0) {
-            return { seenMap: {}, forcedMap: {}, myForcedIds: [] };
+            return { seenMap: {}, forcedMap: {}, myForcedIds: [], commentsMap: {} };
         }
         const seenMap = {};
         const forcedMap = {};
         const myForcedIds = [];
+        const commentsMap = {};
 
         for (const rawId of tweetIds) {
             const id = String(rawId).trim();
@@ -1301,9 +1685,13 @@ export class XFriendsSyncManager {
             if (this.state.myForcedMap && this.state.myForcedMap[id]) {
                 myForcedIds.push(id);
             }
+            const comments = this.tweetToCommentsMap.get(id);
+            if (comments && comments.length > 0) {
+                commentsMap[id] = comments;
+            }
         }
 
-        return { seenMap, forcedMap, myForcedIds };
+        return { seenMap, forcedMap, myForcedIds, commentsMap };
     }
 
     getFriendsTimelineData() {
@@ -1330,18 +1718,28 @@ export class XFriendsSyncManager {
             const forcedBy = forcedEntries.map(e => e.label);
             const myForcedObj = this.state.myForcedMap ? this.state.myForcedMap[tweetId] : null;
             const forcedByMe = Boolean(myForcedObj);
+            const comments = this.tweetToCommentsMap.get(tweetId) || [];
+            const friendComments = comments.filter(c => !c.isMe);
+            const unreadFriendCommentIds = friendComments
+                .filter(c => c.id && !this.dismissedCommentSet.has(c.id))
+                .map(c => c.id);
+            const hasUnreadFriendComments = unreadFriendCommentIds.length > 0;
+            const friendCommentAuthors = Array.from(new Set(friendComments.map(c => c.authorName).filter(Boolean)));
+            const latestFriendCommentAt = friendComments.reduce((max, c) => Math.max(max, c.createdAt || 0), 0);
+            const latestMyCommentAt = comments.filter(c => c.isMe).reduce((max, c) => Math.max(max, c.createdAt || 0), 0);
+
             // Only treat a post as incoming-forced if at least one friend forced it to you
             const isForced = forcedBy.length > 0;
-            // Posts forced ONLY by you (not seen or forced by any friend) are kept for the "Sent" filter tab only
-            const isSentOnly = forcedByMe && forcedBy.length === 0 && seenBy.length === 0;
-            if (meta && meta.isUnavailable && !isForced && !forcedByMe) {
+            // Posts forced ONLY by you (not seen, forced, or commented on by any friend) are kept for the "Sent" filter tab only
+            const isSentOnly = forcedByMe && forcedBy.length === 0 && seenBy.length === 0 && friendComments.length === 0;
+            if (meta && meta.isUnavailable && !isForced && !forcedByMe && friendComments.length === 0) {
                 continue;
             }
             const myForcedAt = myForcedObj?.forcedAt || 0;
             const friendForcedAt = forcedEntries.reduce((max, e) => Math.max(max, e.forcedAt || 0), 0);
-            const latestForcedAt = friendForcedAt || myForcedAt;
+            const latestForcedAt = Math.max(friendForcedAt, latestFriendCommentAt) || myForcedAt || latestMyCommentAt;
             const isSeenByMe = this.mySeenSet.has(tweetId);
-            const isDismissed = this.dismissedForcedSet.has(tweetId);
+            const isDismissed = (isForced ? this.dismissedForcedSet.has(tweetId) : true) && !hasUnreadFriendComments;
             const snowflakeTimeMs = this.getSnowflakeTimestampMs(tweetId);
             const sortTimestamp = latestForcedAt || meta?.updatedAt || snowflakeTimeMs || 0;
 
@@ -1354,6 +1752,11 @@ export class XFriendsSyncManager {
                 isSentOnly,
                 myForcedAt,
                 latestForcedAt,
+                latestFriendCommentAt,
+                hasUnreadFriendComments,
+                unreadFriendCommentIds,
+                friendCommentAuthors,
+                comments,
                 isSeenByMe,
                 isDismissed,
                 snowflakeTimeMs,
@@ -1363,15 +1766,17 @@ export class XFriendsSyncManager {
 
             timelinePosts.push(postItem);
 
-            if (forcedBy.length > 0 && !isDismissed) {
+            if (!isDismissed && (isForced || hasUnreadFriendComments)) {
                 unseenForcedPosts.push(postItem);
             }
         }
 
-        // Sort timeline posts: friends' forced posts first (newest forcedAt), then seen posts (newest snowflake / updatedAt)
+        // Sort timeline posts: friends' forced/re-forced posts first (newest activity), then seen posts (newest snowflake / updatedAt)
         timelinePosts.sort((a, b) => {
-            if (a.isForced !== b.isForced) return a.isForced ? -1 : 1;
-            if (a.isForced && b.isForced && a.latestForcedAt !== b.latestForcedAt) {
+            const aActive = a.isForced || a.hasUnreadFriendComments;
+            const bActive = b.isForced || b.hasUnreadFriendComments;
+            if (aActive !== bActive) return aActive ? -1 : 1;
+            if (aActive && bActive && a.latestForcedAt !== b.latestForcedAt) {
                 return b.latestForcedAt - a.latestForcedAt;
             }
             if (a.isSentOnly !== b.isSentOnly) return a.isSentOnly ? 1 : -1;
@@ -1384,8 +1789,8 @@ export class XFriendsSyncManager {
         const maxTimelineItems = FRIEND_SYNC_CONFIG.MAX_TIMELINE_ITEMS || 300;
         let cappedTimelinePosts = timelinePosts;
         if (timelinePosts.length > maxTimelineItems) {
-            const pinnedOrSent = timelinePosts.filter(p => p.isForced || p.forcedByMe);
-            const regularSeen = timelinePosts.filter(p => !p.isForced && !p.forcedByMe);
+            const pinnedOrSent = timelinePosts.filter(p => p.isForced || p.forcedByMe || p.hasUnreadFriendComments);
+            const regularSeen = timelinePosts.filter(p => !p.isForced && !p.forcedByMe && !p.hasUnreadFriendComments);
             const remainingBudget = Math.max(0, maxTimelineItems - pinnedOrSent.length);
             cappedTimelinePosts = [
                 ...pinnedOrSent.filter(p => !p.isSentOnly),
@@ -1507,13 +1912,31 @@ export class XFriendsSyncManager {
             .filter(item => item && this.isValidRecentTweetId(item.id))
             .slice(-(FRIEND_SYNC_CONFIG.MAX_FORCED_IDS || 100));
 
-        // Include compact post metadata for all forced posts + most recent seen posts (up to MAX_POST_META_ENTRIES)
+        // Include compact post metadata for all forced posts + commented posts + most recent seen posts (up to MAX_POST_META_ENTRIES)
         const posts = {};
         const maxSeenMetaEntries = FRIEND_SYNC_CONFIG.MAX_POST_META_ENTRIES || 25;
         for (const forcedItem of forcedList) {
             const meta = this.state.postMetaMap[forcedItem.id];
             if (meta && !meta.isUnavailable) {
                 posts[forcedItem.id] = meta;
+            }
+        }
+        const comments = {};
+        const maxCommentsPerTweet = FRIEND_SYNC_CONFIG.MAX_COMMENTS_PER_TWEET || 25;
+        if (this.state.myForcedCommentsMap && typeof this.state.myForcedCommentsMap === 'object') {
+            for (const [tid, list] of Object.entries(this.state.myForcedCommentsMap)) {
+                if (!this.isValidRecentTweetId(tid) || !Array.isArray(list) || list.length === 0) continue;
+                const cleanList = list
+                    .map(c => this.sanitizeForceCommentEntry(c))
+                    .filter(Boolean)
+                    .slice(-maxCommentsPerTweet);
+                if (cleanList.length > 0) {
+                    comments[tid] = cleanList;
+                    const meta = this.state.postMetaMap[tid];
+                    if (!posts[tid] && meta && !meta.isUnavailable) {
+                        posts[tid] = meta;
+                    }
+                }
             }
         }
         const recentSeenForMeta = seenIds.slice(-maxSeenMetaEntries).reverse();
@@ -1534,6 +1957,7 @@ export class XFriendsSyncManager {
             updatedAt: Date.now(),
             ids: seenIds,
             forced: forcedList,
+            comments,
             posts
         };
 
@@ -1648,7 +2072,10 @@ export class XFriendsSyncManager {
             mySeenIds: Array.from(this.mySeenSet).slice(-FRIEND_SYNC_CONFIG.MAX_SEEN_IDS),
             myForcedMap: this.state.myForcedMap || {},
             unforcedMap: this.state.unforcedMap || {},
+            myForcedCommentsMap: this.state.myForcedCommentsMap || {},
+            deletedCommentsMap: this.state.deletedCommentsMap || {},
             dismissedForcedIds: Array.from(this.dismissedForcedSet),
+            dismissedCommentIds: Array.from(this.dismissedCommentSet),
             preferences,
             preferencesUpdatedAt
         };
@@ -1739,6 +2166,9 @@ export class XFriendsSyncManager {
                 delete this.state.friends[fEmail];
                 delete this.state.friendSeenMap[fEmail];
                 delete this.state.friendForcedMap[fEmail];
+                if (this.state.friendCommentsMap) {
+                    delete this.state.friendCommentsMap[fEmail];
+                }
                 changed = true;
             }
         }
@@ -1842,7 +2272,7 @@ export class XFriendsSyncManager {
             }
         }
 
-        // 6. Merge dismissedForcedIds
+        // 6. Merge dismissedForcedIds & dismissedCommentIds
         if (Array.isArray(remote.dismissedForcedIds)) {
             for (const rawId of remote.dismissedForcedIds) {
                 const tid = String(rawId || '').trim();
@@ -1850,6 +2280,87 @@ export class XFriendsSyncManager {
                     this.dismissedForcedSet.add(tid);
                     this.mySeenSet.add(tid);
                     changed = true;
+                }
+            }
+        }
+
+        if (Array.isArray(remote.dismissedCommentIds)) {
+            for (const rawCid of remote.dismissedCommentIds) {
+                const cid = String(rawCid || '').trim();
+                if (cid && !this.dismissedCommentSet.has(cid)) {
+                    this.dismissedCommentSet.add(cid);
+                    this.notifiedCommentSet.add(cid);
+                    changed = true;
+                }
+            }
+        }
+
+        // 6b. Merge deletedCommentsMap & myForcedCommentsMap
+        if (!this.state.deletedCommentsMap) this.state.deletedCommentsMap = {};
+        if (remote.deletedCommentsMap && typeof remote.deletedCommentsMap === 'object') {
+            for (const [rawCid, deletedAt] of Object.entries(remote.deletedCommentsMap)) {
+                const cid = String(rawCid || '').trim();
+                const dTime = Number(deletedAt) || 0;
+                if (cid && dTime > (this.state.deletedCommentsMap[cid] || 0)) {
+                    this.state.deletedCommentsMap[cid] = dTime;
+                    changed = true;
+                }
+            }
+        }
+
+        if (!this.state.myForcedCommentsMap) this.state.myForcedCommentsMap = {};
+        for (const [tid, list] of Object.entries(this.state.myForcedCommentsMap)) {
+            if (!Array.isArray(list)) {
+                delete this.state.myForcedCommentsMap[tid];
+                changed = true;
+                continue;
+            }
+            const uTime = this.state.unforcedMap[tid] || 0;
+            const filtered = list.filter(c => {
+                if (!c || !c.id) return false;
+                if (this.state.deletedCommentsMap[c.id]) return false;
+                if (uTime >= (c.createdAt || 0)) return false;
+                return true;
+            });
+            if (filtered.length !== list.length) {
+                if (filtered.length > 0) {
+                    this.state.myForcedCommentsMap[tid] = filtered;
+                } else {
+                    delete this.state.myForcedCommentsMap[tid];
+                }
+                changed = true;
+                sawAdditionalItems = true;
+            }
+        }
+
+        if (remote.myForcedCommentsMap && typeof remote.myForcedCommentsMap === 'object') {
+            const maxCommentsPerTweet = FRIEND_SYNC_CONFIG.MAX_COMMENTS_PER_TWEET || 25;
+            for (const [rawTid, rawList] of Object.entries(remote.myForcedCommentsMap)) {
+                const tid = String(rawTid || '').trim();
+                if (!this.isValidRecentTweetId(tid, now) || !Array.isArray(rawList)) continue;
+                const uTime = this.state.unforcedMap[tid] || 0;
+                const existingList = Array.isArray(this.state.myForcedCommentsMap[tid])
+                    ? this.state.myForcedCommentsMap[tid]
+                    : [];
+                const byId = new Map(existingList.filter(c => c && c.id).map(c => [c.id, c]));
+                let addedForTweet = false;
+                for (const rawC of rawList) {
+                    const cleanC = this.sanitizeForceCommentEntry(rawC, remote.updatedAt || now);
+                    if (!cleanC) continue;
+                    if (this.state.deletedCommentsMap[cleanC.id]) continue;
+                    if (uTime >= cleanC.createdAt) continue;
+                    if (!byId.has(cleanC.id)) {
+                        byId.set(cleanC.id, cleanC);
+                        addedForTweet = true;
+                    }
+                }
+                if (addedForTweet) {
+                    this.state.myForcedCommentsMap[tid] = Array.from(byId.values())
+                        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)))
+                        .slice(-maxCommentsPerTweet);
+                    this.mySeenSet.add(tid);
+                    changed = true;
+                    sawAdditionalItems = true;
                 }
             }
         }
@@ -1941,6 +2452,14 @@ export class XFriendsSyncManager {
                     .map(f => f.email)
             );
             const prevForcedIds = new Set(this.tweetToForcedByMap.keys());
+            const prevFriendCommentIds = new Set();
+            for (const comments of this.tweetToCommentsMap.values()) {
+                for (const c of comments) {
+                    if (!c.isMe && c.id) {
+                        prevFriendCommentIds.add(c.id);
+                    }
+                }
+            }
 
             // Check if local preferences changed since last self-sync
             const prevPrefsUpdatedAt = this.state.preferencesUpdatedAt || 0;
@@ -2156,6 +2675,7 @@ export class XFriendsSyncManager {
                 const now = Date.now();
                 const mergedFriendIds = new Map(); // friendEmail -> Set<string>
                 const mergedFriendForced = new Map(); // friendEmail -> Map<tweetId, { id, forcedAt }>
+                const mergedFriendComments = new Map(); // friendEmail -> Map<tweetId, Map<commentId, { id, text, createdAt }>>
 
                 for (const ev of feedEvents) {
                     const targets = pubkeyToTargets.get(ev.pubkey) || [];
@@ -2191,6 +2711,30 @@ export class XFriendsSyncManager {
                                     }
                                 }
                             }
+                            if (decrypted.comments && typeof decrypted.comments === 'object') {
+                                let commentsByTweet = mergedFriendComments.get(friend.email);
+                                if (!commentsByTweet) {
+                                    commentsByTweet = new Map();
+                                    mergedFriendComments.set(friend.email, commentsByTweet);
+                                }
+                                for (const [rawTid, rawCommentList] of Object.entries(decrypted.comments)) {
+                                    const tid = String(rawTid || '').trim();
+                                    if (!this.isValidRecentTweetId(tid, now) || !Array.isArray(rawCommentList)) continue;
+                                    let tweetComments = commentsByTweet.get(tid);
+                                    if (!tweetComments) {
+                                        tweetComments = new Map();
+                                        commentsByTweet.set(tid, tweetComments);
+                                    }
+                                    for (const rawC of rawCommentList) {
+                                        const cleanC = this.sanitizeForceCommentEntry(rawC, decrypted.updatedAt || now);
+                                        if (!cleanC) continue;
+                                        const prevC = tweetComments.get(cleanC.id);
+                                        if (!prevC || cleanC.createdAt >= prevC.createdAt) {
+                                            tweetComments.set(cleanC.id, cleanC);
+                                        }
+                                    }
+                                }
+                            }
                             if (decrypted.posts && typeof decrypted.posts === 'object') {
                                 for (const [postId, rawPostMeta] of Object.entries(decrypted.posts)) {
                                     const sanitized = this.sanitizeTweetMeta(postId, rawPostMeta);
@@ -2218,6 +2762,23 @@ export class XFriendsSyncManager {
                     } else {
                         this.state.friendForcedMap[fEmail] = [];
                     }
+                    const commentsByTweet = mergedFriendComments.get(fEmail);
+                    if (!this.state.friendCommentsMap) this.state.friendCommentsMap = {};
+                    if (commentsByTweet && commentsByTweet.size > 0) {
+                        const friendCommentObj = {};
+                        const maxCommentsPerTweet = FRIEND_SYNC_CONFIG.MAX_COMMENTS_PER_TWEET || 25;
+                        for (const [tid, cMap] of commentsByTweet.entries()) {
+                            const arr = Array.from(cMap.values())
+                                .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id).localeCompare(String(b.id)))
+                                .slice(-maxCommentsPerTweet);
+                            if (arr.length > 0) {
+                                friendCommentObj[tid] = arr;
+                            }
+                        }
+                        this.state.friendCommentsMap[fEmail] = friendCommentObj;
+                    } else {
+                        this.state.friendCommentsMap[fEmail] = {};
+                    }
                     friend.lastSyncedAt = now;
                     friend.seenCount = validIds.length;
                     stateChanged = true;
@@ -2231,7 +2792,7 @@ export class XFriendsSyncManager {
                 this.broadcastSeenUpdateToTabs();
             }
 
-            // Compute newly discovered invites and forced posts for notifications
+            // Compute newly discovered invites, forced posts, and force comments for notifications
             let notifiedSetChanged = false;
             const newInvites = [];
             for (const f of Object.values(this.state.friends)) {
@@ -2247,15 +2808,25 @@ export class XFriendsSyncManager {
             }
 
             const candidateForcedPosts = [];
+            const newlyNotifiedForcedTweetIds = new Set();
             for (const [tweetId, entries] of this.tweetToForcedByMap.entries()) {
                 if (!this.dismissedForcedSet.has(tweetId) && (!prevForcedIds.has(tweetId) || !this.notifiedForcedSet.has(tweetId))) {
                     this.notifiedForcedSet.add(tweetId);
                     notifiedSetChanged = true;
+                    newlyNotifiedForcedTweetIds.add(tweetId);
                     const latestForcedAt = entries.reduce((max, e) => Math.max(max, e.forcedAt || 0), 0);
+                    const allTweetComments = this.tweetToCommentsMap.get(tweetId) || [];
+                    const friendComments = allTweetComments.filter(c => !c.isMe);
+                    for (const fc of friendComments) {
+                        if (fc.id) this.notifiedCommentSet.add(fc.id);
+                    }
+                    const latestComment = friendComments.length > 0 ? friendComments[friendComments.length - 1] : null;
                     candidateForcedPosts.push({
                         tweetId,
                         latestForcedAt,
                         forcedBy: entries.map(e => e.label),
+                        latestComment,
+                        comments: friendComments,
                         meta: this.state.postMetaMap[tweetId] || null
                     });
                 }
@@ -2265,6 +2836,30 @@ export class XFriendsSyncManager {
             candidateForcedPosts.sort((a, b) => (b.latestForcedAt || 0) - (a.latestForcedAt || 0));
             const newForcedPosts = candidateForcedPosts.slice(0, 5);
 
+            const candidateForceComments = [];
+            for (const [tweetId, comments] of this.tweetToCommentsMap.entries()) {
+                if (newlyNotifiedForcedTweetIds.has(tweetId)) continue;
+                for (const c of comments) {
+                    if (c.isMe || !c.id) continue;
+                    if (!this.dismissedCommentSet.has(c.id) && (!prevFriendCommentIds.has(c.id) || !this.notifiedCommentSet.has(c.id))) {
+                        this.notifiedCommentSet.add(c.id);
+                        notifiedSetChanged = true;
+                        candidateForceComments.push({
+                            tweetId,
+                            commentId: c.id,
+                            text: c.text,
+                            createdAt: c.createdAt,
+                            authorName: c.authorName,
+                            authorLabel: c.authorLabel,
+                            authorEmail: c.authorEmail,
+                            meta: this.state.postMetaMap[tweetId] || null
+                        });
+                    }
+                }
+            }
+            candidateForceComments.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+            const newForceComments = candidateForceComments.slice(0, 5);
+
             if (notifiedSetChanged) {
                 this.pruneMySeenIds();
                 await this.saveState();
@@ -2273,10 +2868,11 @@ export class XFriendsSyncManager {
             this.lastSyncNotifications = {
                 newInvites,
                 newForcedPosts,
+                newForceComments,
                 timestamp: Date.now()
             };
 
-            if ((newInvites.length > 0 || newForcedPosts.length > 0) && typeof this.onNotification === 'function') {
+            if ((newInvites.length > 0 || newForcedPosts.length > 0 || newForceComments.length > 0) && typeof this.onNotification === 'function') {
                 try {
                     await this.onNotification(this.lastSyncNotifications);
                 } catch (notifErr) {
@@ -2316,17 +2912,21 @@ export class XFriendsSyncManager {
         }
     }
 
-    broadcastDismissUpdateToTabs(tweetIdOrIds) {
+    broadcastDismissUpdateToTabs(tweetIdOrIds, commentIdsMap = {}) {
         try {
             if (!chrome?.tabs?.query) return;
             const ids = Array.isArray(tweetIdOrIds) ? tweetIdOrIds : [tweetIdOrIds].filter(Boolean);
+            const payload = { tweetIds: ids, tweetId: ids[0] };
+            if (commentIdsMap && Object.keys(commentIdsMap).length > 0) {
+                payload.commentIdsMap = commentIdsMap;
+            }
             chrome.tabs.query({ url: ['*://twitter.com/*', '*://x.com/*'] }, (tabs) => {
                 if (!Array.isArray(tabs)) return;
                 tabs.forEach(tab => {
                     if (tab.id) {
                         chrome.tabs.sendMessage(tab.id, {
                             action: 'X_FRIENDS_DISMISS_UPDATED',
-                            payload: { tweetIds: ids, tweetId: ids[0] }
+                            payload
                         }).catch(() => {});
                     }
                 });

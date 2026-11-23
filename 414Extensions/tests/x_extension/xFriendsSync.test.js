@@ -999,5 +999,160 @@ describe('XFriendsSyncManager', () => {
         expect(unseenIds).toEqual(['1850000000000003003']);
         expect(bobManager.lastSyncNotifications.newForcedPosts.map(p => p.tweetId)).toEqual(['1850000000000003003']);
     });
+
+    test('should support optional after-the-fact force comments, multi-message chronological threads, scoped re-forcing, comment deletion, and unforce cleanup', async () => {
+        const aliceManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+        const bobManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+        const charlieManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+
+        await aliceManager.setIdentity('alice@example.com', 'Alice');
+        await aliceManager.addFriend('bob@example.com');
+
+        storageMap.clear();
+        await bobManager.setIdentity('bob@example.com', 'Bob');
+        await bobManager.acceptFriend('alice@example.com');
+        await bobManager.addFriend('charlie@example.com');
+
+        storageMap.clear();
+        await charlieManager.setIdentity('charlie@example.com', 'Charlie');
+        await charlieManager.acceptFriend('bob@example.com');
+
+        await aliceManager.syncWithRelays();
+        await bobManager.syncWithRelays();
+        await charlieManager.syncWithRelays();
+
+        const tweetId = '1850000000000004001';
+        const now = Date.now();
+        jest.spyOn(Date, 'now').mockReturnValue(now);
+
+        // 1. Alice forces tweet right away WITHOUT any comment
+        const forceRes = await aliceManager.forceTweetToFriends(tweetId, {
+            screenName: 'newsorg',
+            authorName: 'News Org',
+            text: 'Check out this story'
+        });
+        expect(forceRes.forced).toBe(true);
+        expect(forceRes.comments).toEqual([]);
+
+        await bobManager.syncWithRelays();
+        expect(bobManager.getFriendsTimelineData().unseenForcedPosts.map(p => p.tweetId)).toContain(tweetId);
+        expect(bobManager.lastSyncNotifications.newForcedPosts).toHaveLength(1);
+        expect(bobManager.lastSyncNotifications.newForcedPosts[0].latestComment).toBeNull();
+
+        // Bob dismisses the initial force
+        await bobManager.dismissForcedTweet(tweetId);
+        expect(bobManager.getFriendsTimelineData().unseenForcedPosts).toHaveLength(0);
+
+        // 2. After the fact, Alice adds an optional comment -> re-forces the tweet back onto Bob's feed and notifies
+        Date.now.mockReturnValue(now + 1000);
+        const aliceCommentRes = await aliceManager.addForceComment(tweetId, 'Wait look at the second paragraph');
+        expect(aliceCommentRes.comments).toHaveLength(1);
+        expect(aliceCommentRes.comments[0].isMe).toBe(true);
+
+        await bobManager.syncWithRelays();
+        const bobTimelineAfterAliceComment = bobManager.getFriendsTimelineData();
+        expect(bobTimelineAfterAliceComment.unseenForcedPosts.map(p => p.tweetId)).toEqual([tweetId]);
+        expect(bobTimelineAfterAliceComment.unseenForcedPosts[0].hasUnreadFriendComments).toBe(true);
+        expect(bobTimelineAfterAliceComment.unseenForcedPosts[0].comments).toHaveLength(1);
+        expect(bobTimelineAfterAliceComment.unseenForcedPosts[0].comments[0].text).toBe('Wait look at the second paragraph');
+        expect(bobManager.lastSyncNotifications.newForceComments).toEqual([
+            expect.objectContaining({
+                tweetId,
+                text: 'Wait look at the second paragraph',
+                authorName: 'Alice'
+            })
+        ]);
+
+        // Bob dismisses again, then replies with two back-and-forth comments (without forcing it himself)
+        await bobManager.dismissForcedTweet(tweetId);
+        expect(bobManager.getFriendsTimelineData().unseenForcedPosts).toHaveLength(0);
+
+        Date.now.mockReturnValue(now + 2000);
+        await bobManager.addForceComment(tweetId, 'Whoa good catch!');
+        Date.now.mockReturnValue(now + 3000);
+        const bobSecondRes = await bobManager.addForceComment(tweetId, 'Did you read the reply too?');
+        expect(bobSecondRes.comments.map(c => c.text)).toEqual([
+            'Wait look at the second paragraph',
+            'Whoa good catch!',
+            'Did you read the reply too?'
+        ]);
+
+        // 3. Alice syncs: Bob's reply re-surfaces the tweet onto Alice's unseenForcedPosts (even though only Alice forced it)
+        await aliceManager.syncWithRelays();
+        const aliceTimelineAfterBob = aliceManager.getFriendsTimelineData();
+        expect(aliceTimelineAfterBob.unseenForcedPosts.map(p => p.tweetId)).toEqual([tweetId]);
+        expect(aliceTimelineAfterBob.unseenForcedPosts[0].hasUnreadFriendComments).toBe(true);
+        expect(aliceTimelineAfterBob.unseenForcedPosts[0].comments.map(c => c.text)).toEqual([
+            'Wait look at the second paragraph',
+            'Whoa good catch!',
+            'Did you read the reply too?'
+        ]);
+        expect(aliceManager.checkTweetsSyncStatus([tweetId]).commentsMap[tweetId]).toHaveLength(3);
+        expect(aliceManager.lastSyncNotifications.newForceComments).toHaveLength(2);
+
+        // 4. Scoped visibility: Charlie (friends with Bob only, NOT Alice) must NOT get the tweet forced or commented on
+        await charlieManager.syncWithRelays();
+        const charlieTimeline = charlieManager.getFriendsTimelineData();
+        expect(charlieTimeline.unseenForcedPosts).toHaveLength(0);
+        expect(charlieManager.checkTweetsSyncStatus([tweetId]).commentsMap).toEqual({});
+
+        // 5. Bob deletes his first comment -> removed on Alice's sync and tombstoned in Bob's self-sync
+        const bobFirstCommentId = bobSecondRes.comments[1].id;
+        await bobManager.deleteForceComment(tweetId, bobFirstCommentId);
+        await aliceManager.syncWithRelays();
+        expect(aliceManager.checkTweetsSyncStatus([tweetId]).commentsMap[tweetId].map(c => c.text)).toEqual([
+            'Wait look at the second paragraph',
+            'Did you read the reply too?'
+        ]);
+
+        // 6. Alice unforces the tweet -> deletes all of Alice's comments on that tweet and removes force from Bob
+        await aliceManager.unforceTweet(tweetId);
+        expect(aliceManager.state.myForcedCommentsMap[tweetId]).toBeUndefined();
+        expect(aliceManager.checkTweetsSyncStatus([tweetId]).commentsMap[tweetId]).toBeUndefined();
+
+        await bobManager.syncWithRelays();
+        expect(bobManager.getFriendsTimelineData().unseenForcedPosts).toHaveLength(0);
+        expect(bobManager.checkTweetsSyncStatus([tweetId]).commentsMap[tweetId]).toBeUndefined();
+
+        Date.now.mockRestore();
+    });
+
+    test('newForcedPosts notification should include latestComment without emitting duplicate newForceComments on initial force+comment sync', async () => {
+        const aliceManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+        const bobManager = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+
+        await aliceManager.setIdentity('alice@example.com', 'Alice');
+        await aliceManager.addFriend('bob@example.com');
+        storageMap.clear();
+        await bobManager.setIdentity('bob@example.com', 'Bob');
+        await bobManager.acceptFriend('alice@example.com');
+        await aliceManager.syncWithRelays();
+
+        const tweetId = '1850000000000004002';
+        await aliceManager.forceTweetToFriends(tweetId, { screenName: 'dev', text: 'Cool post' });
+        await aliceManager.addForceComment(tweetId, 'Must read!');
+
+        await bobManager.syncWithRelays();
+        expect(bobManager.lastSyncNotifications.newForcedPosts).toHaveLength(1);
+        expect(bobManager.lastSyncNotifications.newForcedPosts[0].latestComment).toEqual(
+            expect.objectContaining({ text: 'Must read!' })
+        );
+        expect(bobManager.lastSyncNotifications.newForceComments).toEqual([]);
+    });
 });
 

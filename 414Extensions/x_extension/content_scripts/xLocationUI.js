@@ -469,6 +469,301 @@
         return ref.parentElement === actionBar ? ref : null;
     }
 
+    function createDeleteCommentSVG() {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', '13');
+        svg.setAttribute('height', '13');
+        svg.setAttribute('fill', 'none');
+        svg.setAttribute('stroke', 'currentColor');
+        svg.setAttribute('stroke-width', '2.2');
+        svg.setAttribute('stroke-linecap', 'round');
+        svg.innerHTML = '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>';
+        return svg;
+    }
+
+    function findForceCommentsMountPoint(article) {
+        if (!article) return { parent: null, ref: null };
+        if (article.classList && article.classList.contains('x-friend-tweet-card')) {
+            const rightCol = article.querySelector('.x-friend-card-right');
+            const footer = rightCol ? rightCol.querySelector('.x-friend-card-footer') : article.querySelector('.x-friend-card-footer');
+            if (rightCol && footer && footer.parentNode === rightCol) {
+                return { parent: rightCol, ref: footer.nextSibling };
+            }
+            if (rightCol) {
+                return { parent: rightCol, ref: null };
+            }
+        }
+        const actionBar = findTweetActionBar(article);
+        if (actionBar && actionBar.parentNode && article.contains(actionBar.parentNode)) {
+            let mountParent = actionBar.parentNode;
+            let afterNode = actionBar;
+            if (mountParent !== article && mountParent.parentNode && article.contains(mountParent.parentNode)) {
+                let isRowWrapper = Boolean(mountParent.style && mountParent.style.flexDirection === 'row');
+                if (!isRowWrapper && typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+                    try {
+                        const cs = window.getComputedStyle(mountParent);
+                        if (cs && cs.display && cs.display.includes('flex') && cs.flexDirection === 'row') {
+                            isRowWrapper = true;
+                        }
+                    } catch (e) {}
+                }
+                if (isRowWrapper) {
+                    afterNode = mountParent;
+                    mountParent = mountParent.parentNode;
+                }
+            }
+            return { parent: mountParent, ref: afterNode.nextSibling };
+        }
+        return { parent: article, ref: null };
+    }
+
+    function removeForceCommentsSection(article) {
+        if (!article || !article.querySelectorAll) return;
+        const sections = article.querySelectorAll('.x-force-comments-section');
+        sections.forEach(sec => {
+            if (sec.parentNode) {
+                sec.parentNode.removeChild(sec);
+            }
+        });
+    }
+
+    function reconcileForceCommentsList(section, comments) {
+        const listEl = section ? section.querySelector('.x-force-comments-list') : null;
+        if (!listEl) return;
+
+        const now = Date.now();
+        const pendingAdds = Array.isArray(section._xPendingAdds)
+            ? section._xPendingAdds.filter(p => p && (now - p.createdAt) < 10000)
+            : [];
+        const pendingDeletes = section._xPendingDeletes instanceof Map
+            ? section._xPendingDeletes
+            : new Map();
+        for (const [cid, ts] of Array.from(pendingDeletes.entries())) {
+            if ((now - ts) >= 10000) pendingDeletes.delete(cid);
+        }
+
+        const authComments = Array.isArray(comments) ? comments : [];
+        const remainingPendingAdds = pendingAdds.filter(p => {
+            const matched = authComments.some(
+                c => c && c.isMe && c.text === p.text && Math.abs((c.createdAt || 0) - p.createdAt) < 30000
+            );
+            return !matched;
+        });
+        section._xPendingAdds = remainingPendingAdds;
+
+        for (const cid of Array.from(pendingDeletes.keys())) {
+            if (!authComments.some(c => c && c.id === cid)) {
+                pendingDeletes.delete(cid);
+            }
+        }
+        section._xPendingDeletes = pendingDeletes;
+
+        const merged = [];
+        const seenIds = new Set();
+        for (const c of authComments) {
+            if (!c || !c.text) continue;
+            if (c.id && pendingDeletes.has(c.id)) continue;
+            if (c.id && seenIds.has(c.id)) continue;
+            if (c.id) seenIds.add(c.id);
+            merged.push(c);
+        }
+        for (const p of remainingPendingAdds) {
+            merged.push({
+                id: p.tempId,
+                text: p.text,
+                createdAt: p.createdAt,
+                authorName: 'You',
+                isMe: true,
+                isPending: true
+            });
+        }
+        merged.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0) || String(a.id || '').localeCompare(String(b.id || '')));
+
+        const sig = merged.map(c => `${c.id || ''}:${c.isMe ? '1' : '0'}:${c.authorName || ''}:${c.text || ''}:${c.createdAt || 0}`).join('|');
+        if (listEl._xCommentsSig === sig) {
+            listEl.style.display = merged.length > 0 ? '' : 'none';
+            return;
+        }
+        listEl._xCommentsSig = sig;
+        listEl.innerHTML = '';
+        listEl.style.display = merged.length > 0 ? '' : 'none';
+
+        merged.forEach(c => {
+            const item = document.createElement('div');
+            item.className = `x-force-comment-item${c.isMe ? ' is-me' : ''}`;
+            if (c.id) item.setAttribute('data-comment-id', c.id);
+
+            const metaRow = document.createElement('div');
+            metaRow.className = 'x-force-comment-meta';
+
+            const authorSpan = document.createElement('span');
+            authorSpan.className = 'x-force-comment-author';
+            authorSpan.textContent = c.isMe ? 'You' : (c.authorName || c.authorLabel || 'Friend');
+            metaRow.appendChild(authorSpan);
+
+            const relTime = formatRelativeTime(c.createdAt);
+            if (relTime) {
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'x-force-comment-time';
+                timeSpan.textContent = `· ${relTime}`;
+                metaRow.appendChild(timeSpan);
+            }
+
+            if (c.isMe && c.id) {
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'x-force-comment-delete-btn';
+                delBtn.setAttribute('data-testid', 'x-force-comment-delete-btn');
+                delBtn.title = 'Delete comment';
+                delBtn.setAttribute('aria-label', 'Delete comment');
+                delBtn.appendChild(createDeleteCommentSVG());
+                delBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    const opts = section._xCommentOptions || {};
+                    if (c.isPending) {
+                        section._xPendingAdds = (section._xPendingAdds || []).filter(p => p.tempId !== c.id);
+                    } else {
+                        if (!(section._xPendingDeletes instanceof Map)) section._xPendingDeletes = new Map();
+                        section._xPendingDeletes.set(c.id, Date.now());
+                        if (typeof opts.onDeleteComment === 'function') {
+                            opts.onDeleteComment(opts.tweetId, c.id, opts.article);
+                        }
+                    }
+                    const nextBase = (opts.comments || []).filter(entry => entry && entry.id !== c.id);
+                    opts.comments = nextBase;
+                    reconcileForceCommentsList(section, nextBase);
+                });
+                metaRow.appendChild(delBtn);
+            }
+
+            const bodyDiv = document.createElement('div');
+            bodyDiv.className = 'x-force-comment-text';
+            bodyDiv.setAttribute('data-testid', 'x-force-comment-text');
+            appendFormattedTweetText(bodyDiv, c.text);
+
+            item.appendChild(metaRow);
+            item.appendChild(bodyDiv);
+            listEl.appendChild(item);
+        });
+    }
+
+    function renderForceCommentsSection(article, tweetId, options = {}) {
+        if (!article || !tweetId) return null;
+        const isForced = Boolean(options.isForced);
+        if (!isForced) {
+            removeForceCommentsSection(article);
+            return null;
+        }
+
+        let section = article.querySelector('.x-force-comments-section');
+        if (section && section.getAttribute('data-tweet-id') !== String(tweetId)) {
+            removeForceCommentsSection(article);
+            section = null;
+        }
+
+        const mount = findForceCommentsMountPoint(article);
+        if (!mount.parent) return null;
+
+        if (!section) {
+            section = document.createElement('div');
+            section.className = 'x-force-comments-section';
+            section.setAttribute('data-testid', 'x-force-comments-section');
+            section.setAttribute('data-tweet-id', String(tweetId));
+            section._xPendingAdds = [];
+            section._xPendingDeletes = new Map();
+
+            const stopInteractiveProp = (e) => e.stopPropagation();
+            section.addEventListener('click', stopInteractiveProp);
+            section.addEventListener('mousedown', stopInteractiveProp);
+            section.addEventListener('pointerdown', stopInteractiveProp);
+
+            const form = document.createElement('form');
+            form.className = 'x-force-comment-composer';
+
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.className = 'x-force-comment-input';
+            input.setAttribute('data-testid', 'x-force-comment-input');
+            input.placeholder = 'Add a comment...';
+            input.maxLength = 500;
+            input.autocomplete = 'off';
+
+            const sendBtn = document.createElement('button');
+            sendBtn.type = 'submit';
+            sendBtn.className = 'x-force-comment-send-btn';
+            sendBtn.setAttribute('data-testid', 'x-force-comment-send-btn');
+            sendBtn.textContent = 'Send';
+            sendBtn.disabled = true;
+
+            const syncSendDisabled = () => {
+                sendBtn.disabled = !input.value.trim();
+            };
+
+            const stopKeyProp = (e) => {
+                e.stopPropagation();
+            };
+            input.addEventListener('keydown', stopKeyProp);
+            input.addEventListener('keyup', stopKeyProp);
+            input.addEventListener('keypress', stopKeyProp);
+            input.addEventListener('input', syncSendDisabled);
+            input.addEventListener('click', stopInteractiveProp);
+
+            form.addEventListener('submit', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const text = input.value.trim();
+                if (!text) return;
+                const opts = section._xCommentOptions || {};
+                const now = Date.now();
+                const tempId = `pending_${now}_${Math.random().toString(36).slice(2, 7)}`;
+                if (!Array.isArray(section._xPendingAdds)) section._xPendingAdds = [];
+                section._xPendingAdds.push({ tempId, text, createdAt: now });
+                input.value = '';
+                syncSendDisabled();
+                reconcileForceCommentsList(section, opts.comments || []);
+                if (typeof opts.onAddComment === 'function') {
+                    opts.onAddComment(opts.tweetId || tweetId, text, opts.article || article, opts.meta || null);
+                }
+            });
+
+            form.appendChild(input);
+            form.appendChild(sendBtn);
+            section.appendChild(form);
+
+            const listEl = document.createElement('div');
+            listEl.className = 'x-force-comments-list';
+            listEl.setAttribute('data-testid', 'x-force-comments-list');
+            listEl.style.display = 'none';
+            section.appendChild(listEl);
+        }
+
+        if (section.parentNode !== mount.parent) {
+            if (mount.ref && mount.ref.parentNode === mount.parent) {
+                mount.parent.insertBefore(section, mount.ref);
+            } else {
+                mount.parent.appendChild(section);
+            }
+        }
+
+        const prevOpts = section._xCommentOptions || {};
+        const effectiveComments = Array.isArray(options.comments)
+            ? options.comments
+            : (Array.isArray(prevOpts.comments) ? prevOpts.comments : []);
+        section._xCommentOptions = {
+            tweetId: String(tweetId),
+            article,
+            comments: effectiveComments,
+            onAddComment: typeof options.onAddComment === 'function' ? options.onAddComment : prevOpts.onAddComment,
+            onDeleteComment: typeof options.onDeleteComment === 'function' ? options.onDeleteComment : prevOpts.onDeleteComment,
+            meta: options.meta !== undefined ? options.meta : prevOpts.meta
+        };
+
+        reconcileForceCommentsList(section, effectiveComments);
+        return section;
+    }
+
     function renderForceTweetButton(article, tweetId, syncState = {}, onToggleForce = null) {
         if (!article || !tweetId) return null;
 
@@ -504,9 +799,12 @@
                 const curTweetId = btn.getAttribute('data-tweet-id') || tweetId;
                 const currentlyForced = btn.classList.contains('is-forced');
                 const nextForced = !currentlyForced;
+                const latestState = btn._xForceSyncState || {};
+                const forcedByFriendsNow = Array.isArray(latestState.forcedByFriends) ? latestState.forcedByFriends : [];
 
                 btn.classList.toggle('is-forced', nextForced);
                 btn.setAttribute('data-forced-by-me', nextForced ? 'true' : 'false');
+                latestState.forcedByMe = nextForced;
                 btn.title = nextForced
                     ? "Forced to Friends' timelines (click to remove)"
                     : "Force post to Friends' timelines";
@@ -516,8 +814,41 @@
                     ? "⚡ Forced post to Friends' timelines!"
                     : "Removed post from Friends' timelines");
 
-                if (typeof onToggleForce === 'function') {
-                    onToggleForce(curTweetId, nextForced, article);
+                if (nextForced) {
+                    renderForceCommentsSection(article, curTweetId, {
+                        isForced: true,
+                        comments: latestState.comments,
+                        onAddComment: latestState.onAddComment,
+                        onDeleteComment: latestState.onDeleteComment,
+                        meta: latestState.meta
+                    });
+                } else {
+                    const existingSec = article.querySelector('.x-force-comments-section');
+                    if (existingSec) {
+                        existingSec._xPendingAdds = [];
+                    }
+                    if (forcedByFriendsNow.length > 0) {
+                        const existingComments = (existingSec && existingSec._xCommentOptions && Array.isArray(existingSec._xCommentOptions.comments))
+                            ? existingSec._xCommentOptions.comments
+                            : (Array.isArray(latestState.comments) ? latestState.comments : []);
+                        const friendOnlyComments = existingComments.filter(c => c && !c.isMe);
+                        latestState.comments = friendOnlyComments;
+                        renderForceCommentsSection(article, curTweetId, {
+                            isForced: true,
+                            comments: friendOnlyComments,
+                            onAddComment: latestState.onAddComment,
+                            onDeleteComment: latestState.onDeleteComment,
+                            meta: latestState.meta
+                        });
+                    } else {
+                        latestState.comments = [];
+                        renderForceCommentsSection(article, curTweetId, { isForced: false });
+                    }
+                }
+
+                const toggleCb = btn._xOnToggleForce || onToggleForce;
+                if (typeof toggleCb === 'function') {
+                    toggleCb(curTweetId, nextForced, article);
                 }
             });
 
@@ -527,6 +858,16 @@
         btn.setAttribute('data-tweet-id', tweetId);
         const forcedByMe = Boolean(syncState.forcedByMe);
         const forcedByFriends = Array.isArray(syncState.forcedByFriends) ? syncState.forcedByFriends : [];
+
+        btn._xForceSyncState = {
+            ...(btn._xForceSyncState || {}),
+            ...syncState,
+            forcedByMe,
+            forcedByFriends
+        };
+        if (typeof onToggleForce === 'function') {
+            btn._xOnToggleForce = onToggleForce;
+        }
 
         btn.classList.toggle('is-forced', forcedByMe);
         btn.classList.toggle('is-friend-forced', forcedByFriends.length > 0);
@@ -542,6 +883,20 @@
             btn.title = "Force post to Friends' timelines";
         }
         btn.setAttribute('aria-label', btn.title);
+
+        const hasAnyComments = Array.isArray(syncState.comments) && syncState.comments.length > 0;
+        const shouldShowComments = Boolean(
+            forcedByMe ||
+            forcedByFriends.length > 0 ||
+            (hasAnyComments && article.classList && article.classList.contains('is-forced-card'))
+        );
+        renderForceCommentsSection(article, tweetId, {
+            isForced: shouldShowComments,
+            comments: syncState.comments,
+            onAddComment: syncState.onAddComment,
+            onDeleteComment: syncState.onDeleteComment,
+            meta: syncState.meta
+        });
 
         if (article.querySelector && article.querySelector('video') && window.XEnv && typeof window.XEnv.injectDownloadButtons === 'function') {
             try {
@@ -1105,7 +1460,7 @@
         card.setAttribute('data-tweet-id', tweetId);
         card.setAttribute('data-x-tweet-id', tweetId);
 
-        if (forcedBy.length > 0) {
+        if (forcedBy.length > 0 || (forcedByMe && postItem.hasUnreadFriendComments)) {
             card.classList.add('is-forced-card');
         }
         if (isSeenByMe) {
@@ -1121,7 +1476,7 @@
             const sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
             if (sel && String(sel).length > 0) return;
             const interactive = e.target && e.target.closest
-                ? e.target.closest('a, button, video, select, input, .x-location-inline-badge, .x-friend-card-quote')
+                ? e.target.closest('a, button, video, select, input, textarea, form, .x-force-comments-section, .x-location-inline-badge, .x-friend-card-quote')
                 : null;
             if (interactive) return;
 
@@ -1147,6 +1502,15 @@
             myForcedBadge.className = 'x-card-badge x-card-badge-forced-me';
             myForcedBadge.textContent = '⚡ Forced by You';
             badgesRow.appendChild(myForcedBadge);
+        }
+        if (postItem.hasUnreadFriendComments && forcedBy.length === 0) {
+            const commentedAuthors = Array.isArray(postItem.friendCommentAuthors) && postItem.friendCommentAuthors.length > 0
+                ? postItem.friendCommentAuthors.join(', ')
+                : 'Friend';
+            const commentedBadge = document.createElement('span');
+            commentedBadge.className = 'x-card-badge x-card-badge-commented';
+            commentedBadge.textContent = `💬 New comment from ${commentedAuthors}`;
+            badgesRow.appendChild(commentedBadge);
         }
         if (seenBy.length > 0) {
             const seenBadge = document.createElement('span');
@@ -1610,7 +1974,11 @@
         // Attach the standard Force-to-Friends lightning bolt button into footer[role="group"]
         renderForceTweetButton(card, tweetId, {
             forcedByMe,
-            forcedByFriends: forcedBy
+            forcedByFriends: forcedBy,
+            comments: Array.isArray(postItem.comments) ? postItem.comments : [],
+            onAddComment: callbacks.onAddForceComment,
+            onDeleteComment: callbacks.onDeleteForceComment,
+            meta
         }, (tid, nextForced) => {
             card.classList.toggle('is-forced-card', Boolean(nextForced || forcedBy.length > 0));
             if (typeof callbacks.onToggleForce === 'function') {
@@ -1671,6 +2039,15 @@
                 const activeCbs = oldCard._xCallbacks || callbacks;
                 const wasSeen = Boolean(prevItem.isSeenByMe || oldCard.classList.contains('is-seen-by-me'));
                 const wasViewedInSession = oldCard.dataset?.xViewedInSession === 'true';
+                const oldInput = oldCard.querySelector('.x-force-comment-input');
+                const oldDraft = oldInput ? oldInput.value : '';
+                const wasInputFocused = Boolean(oldInput && typeof document !== 'undefined' && document.activeElement === oldInput);
+                const selStart = wasInputFocused && typeof oldInput.selectionStart === 'number' ? oldInput.selectionStart : null;
+                const selEnd = wasInputFocused && typeof oldInput.selectionEnd === 'number' ? oldInput.selectionEnd : null;
+                const oldSec = oldCard.querySelector('.x-force-comments-section');
+                const oldPendingAdds = oldSec && Array.isArray(oldSec._xPendingAdds) ? oldSec._xPendingAdds : null;
+                const oldPendingDeletes = oldSec && oldSec._xPendingDeletes instanceof Map ? oldSec._xPendingDeletes : null;
+
                 const updatedItem = {
                     ...prevItem,
                     isSeenByMe: wasSeen,
@@ -1680,8 +2057,30 @@
                 if (wasViewedInSession && newCard.dataset) {
                     newCard.dataset.xViewedInSession = 'true';
                 }
+                const newSec = newCard.querySelector('.x-force-comments-section');
+                if (newSec && (oldPendingAdds || oldPendingDeletes)) {
+                    if (oldPendingAdds) newSec._xPendingAdds = oldPendingAdds;
+                    if (oldPendingDeletes) newSec._xPendingDeletes = oldPendingDeletes;
+                    reconcileForceCommentsList(newSec, updatedItem.comments || []);
+                }
                 if (oldCard.parentNode) {
                     oldCard.parentNode.replaceChild(newCard, oldCard);
+                }
+                const newInput = newCard.querySelector('.x-force-comment-input');
+                if (newInput) {
+                    if (oldDraft) {
+                        newInput.value = oldDraft;
+                        const newSendBtn = newCard.querySelector('.x-force-comment-send-btn');
+                        if (newSendBtn) newSendBtn.disabled = !oldDraft.trim();
+                    }
+                    if (wasInputFocused && typeof newInput.focus === 'function') {
+                        newInput.focus();
+                        if (selStart !== null && selEnd !== null && typeof newInput.setSelectionRange === 'function') {
+                            try {
+                                newInput.setSelectionRange(selStart, selEnd);
+                            } catch (e) {}
+                        }
+                    }
                 }
             });
         }
@@ -1725,7 +2124,7 @@
         if (cardEl.closest && cardEl.closest('#x-forced-home-feed')) return true;
         if (currentTimelineFilter === 'sent') return true;
         const item = cardEl._xPostItem;
-        if (item && (item.isForced || (Array.isArray(item.forcedBy) && item.forcedBy.length > 0))) {
+        if (item && (item.isForced || item.hasUnreadFriendComments || (Array.isArray(item.forcedBy) && item.forcedBy.length > 0))) {
             return true;
         }
         return false;
@@ -1743,7 +2142,7 @@
         const forcedBy = Array.isArray(postItem.forcedBy) ? postItem.forcedBy : [];
         const forcedByMe = Boolean(postItem.forcedByMe);
         const seenBy = Array.isArray(postItem.seenBy) ? postItem.seenBy : [];
-        const isForced = Boolean(postItem.isForced || forcedBy.length > 0);
+        const isForced = Boolean(postItem.isForced || forcedBy.length > 0 || (forcedByMe && postItem.hasUnreadFriendComments));
 
         card.classList.toggle('is-forced-card', isForced);
         card.classList.toggle('is-seen-by-me', wasSeen);
@@ -1774,7 +2173,7 @@
                 if (!myForcedBadge) {
                     myForcedBadge = document.createElement('span');
                     myForcedBadge.className = 'x-card-badge x-card-badge-forced-me';
-                    const refNode = badgesRow.querySelector('.x-card-badge-seen') || mySeenPill || dismissBtn || null;
+                    const refNode = badgesRow.querySelector('.x-card-badge-commented') || badgesRow.querySelector('.x-card-badge-seen') || mySeenPill || dismissBtn || null;
                     badgesRow.insertBefore(myForcedBadge, refNode);
                 }
                 if (myForcedBadge.textContent !== text) {
@@ -1782,6 +2181,25 @@
                 }
             } else if (myForcedBadge && myForcedBadge.parentNode) {
                 myForcedBadge.parentNode.removeChild(myForcedBadge);
+            }
+
+            let commentedBadge = badgesRow.querySelector('.x-card-badge-commented');
+            if (postItem.hasUnreadFriendComments && forcedBy.length === 0) {
+                const commentedAuthors = Array.isArray(postItem.friendCommentAuthors) && postItem.friendCommentAuthors.length > 0
+                    ? postItem.friendCommentAuthors.join(', ')
+                    : 'Friend';
+                const text = `💬 New comment from ${commentedAuthors}`;
+                if (!commentedBadge) {
+                    commentedBadge = document.createElement('span');
+                    commentedBadge.className = 'x-card-badge x-card-badge-commented';
+                    const refNode = badgesRow.querySelector('.x-card-badge-seen') || mySeenPill || dismissBtn || null;
+                    badgesRow.insertBefore(commentedBadge, refNode);
+                }
+                if (commentedBadge.textContent !== text) {
+                    commentedBadge.textContent = text;
+                }
+            } else if (commentedBadge && commentedBadge.parentNode) {
+                commentedBadge.parentNode.removeChild(commentedBadge);
             }
 
             let seenBadge = badgesRow.querySelector('.x-card-badge-seen');
@@ -1807,7 +2225,11 @@
 
         renderForceTweetButton(card, postItem.tweetId, {
             forcedByMe,
-            forcedByFriends: forcedBy
+            forcedByFriends: forcedBy,
+            comments: Array.isArray(postItem.comments) ? postItem.comments : [],
+            onAddComment: callbacks.onAddForceComment,
+            onDeleteComment: callbacks.onDeleteForceComment,
+            meta: postItem.meta
         }, (tid, nextForced) => {
             card.classList.toggle('is-forced-card', Boolean(nextForced || forcedBy.length > 0));
             const activeCbs = card._xCallbacks || callbacks;
@@ -2104,6 +2526,13 @@
         return nativeTweetCells[targetIndex] || nativeTweetCells[0];
     }
 
+    function getForcedPostActivityKey(postItem) {
+        if (!postItem || !postItem.tweetId) return '';
+        const unreadIds = Array.isArray(postItem.unreadFriendCommentIds) ? postItem.unreadFriendCommentIds : [];
+        const latestUnread = unreadIds.length > 0 ? unreadIds[unreadIds.length - 1] : '';
+        return `${postItem.tweetId}:${latestUnread}`;
+    }
+
     function renderForcedPostsInHomeFeed(timelineContainer, unseenForcedPosts = [], callbacks = {}) {
         if (!timelineContainer) return null;
 
@@ -2142,7 +2571,7 @@
         }
 
         const hasNewUnmountedPost = activeForcedPosts.some(
-            p => p && p.tweetId && !homeFeedMountedForcedIds.has(String(p.tweetId))
+            p => p && p.tweetId && !homeFeedMountedForcedIds.has(getForcedPostActivityKey(p))
         );
 
         const allCells = timelineContainer.querySelectorAll
@@ -2223,7 +2652,7 @@
 
         activeForcedPosts.forEach(p => {
             if (p && p.tweetId) {
-                homeFeedMountedForcedIds.add(String(p.tweetId));
+                homeFeedMountedForcedIds.add(getForcedPostActivityKey(p));
             }
         });
 
@@ -2502,10 +2931,10 @@
 
         tabLink._xFriendsCallbacks = callbacks;
 
-        // Update badge count (unseen forced posts count)
+        // Update badge count (unseen forced posts & re-forced comment activity count)
         const badgeSpan = tabLink.querySelector('.x-friends-tab-badge');
         const unseenForcedCount = Array.isArray(timelineData.unseenForcedPosts)
-            ? timelineData.unseenForcedPosts.filter(p => p && !p.isSeenByMe && !p.isDismissed).length
+            ? timelineData.unseenForcedPosts.filter(p => p && !p.isDismissed && (!p.isSeenByMe || p.hasUnreadFriendComments)).length
             : 0;
         if (badgeSpan) {
             if (unseenForcedCount > 0) {
@@ -2544,7 +2973,9 @@
         const connectedFriends = Array.isArray(timelineData.connectedFriends) ? timelineData.connectedFriends : [];
 
         const incomingPosts = allPosts.filter(p => !p.isSentOnly);
-        const forcedCount = incomingPosts.filter(p => p.isForced).length;
+        const forcedCount = incomingPosts.filter(
+            p => p.isForced || (p.forcedByMe && Array.isArray(p.comments) && p.comments.some(c => !c.isMe))
+        ).length;
         const unseenCount = incomingPosts.filter(p => !p.isSeenByMe).length;
         const sentCount = allPosts.filter(p => p.forcedByMe).length;
 
@@ -2690,7 +3121,7 @@
                 return Boolean(p.forcedByMe);
             }
             if (p.isSentOnly) return false;
-            if (currentTimelineFilter === 'forced' && !p.isForced) return false;
+            if (currentTimelineFilter === 'forced' && !p.isForced && !(p.forcedByMe && Array.isArray(p.comments) && p.comments.some(c => !c.isMe))) return false;
             if (currentTimelineFilter === 'unseen' && p.isSeenByMe && !sessionVisibleTweetIds.has(p.tweetId)) return false;
             if (currentFriendFilter) {
                 const inSeen = Array.isArray(p.seenBy) && p.seenBy.includes(currentFriendFilter);
@@ -3293,6 +3724,7 @@
         renderInlineBadge,
         renderFriendSeenBadge,
         renderForceTweetButton,
+        renderForceCommentsSection,
         renderForcedPostsInHomeFeed,
         ensureFriendsTimelineTab,
         ensureMobileSettingsTrigger,

@@ -133,4 +133,42 @@ describe('BackgroundSyncTask & Pixel Notifications', () => {
         expect(capturedDiffs).toHaveLength(2);
         expect(capturedDiffs[1].newXNotifications[0].title).toContain('X414 Pixel Notifications Active');
     });
+
+    test('buildNotificationsFromSyncDiff should include latest force comment on newForcedPosts and emit Android notifications for newForceComments', () => {
+        const built = buildNotificationsFromSyncDiff({
+            newForcedPosts: [
+                {
+                    tweetId: '1850000000000000991',
+                    forcedBy: ['Alice'],
+                    latestComment: { text: 'Look at this part' },
+                    meta: { screenName: 'dev', text: 'Original tweet body', permalink: 'https://x.com/dev/status/1850000000000000991' }
+                }
+            ],
+            newForceComments: [
+                {
+                    tweetId: '1850000000000000992',
+                    commentId: 'c_992',
+                    authorName: 'Bob',
+                    authorLabel: 'Bob (bob@example.com)',
+                    text: 'New reply on existing forced post!',
+                    meta: { permalink: 'https://x.com/user/status/1850000000000000992' }
+                }
+            ]
+        });
+
+        expect(built).toHaveLength(2);
+        expect(built[0].title).toBe('⚡ Forced by Alice');
+        expect(built[0].body).toContain('💬 "Look at this part"');
+        expect(built[0].data.type).toBe('forced_post');
+
+        expect(built[1].title).toBe('💬 Bob (bob@example.com) commented on a forced post');
+        expect(built[1].body).toBe('New reply on existing forced post!');
+        expect(built[1].channelId).toBe(X414_NOTIFICATION_CHANNEL_ID);
+        expect(built[1].data).toEqual(expect.objectContaining({
+            type: 'force_comment',
+            tweetId: '1850000000000000992',
+            commentId: 'c_992',
+            url: 'https://x.com/user/status/1850000000000000992'
+        }));
+    });
 });

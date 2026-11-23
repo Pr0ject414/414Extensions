@@ -397,12 +397,33 @@ describe('XHostCoordinator & WebView Bridge Integration', () => {
             });
             expect(forceRes.success).toBe(true);
 
+            const addCommentRes = await coordinator.dispatchRuntimeMessage({
+                action: 'X_ADD_FORCE_COMMENT',
+                payload: {
+                    tweetId: '1850000000000000951',
+                    text: 'Comment added from X414!'
+                }
+            });
+            expect(addCommentRes.success).toBe(true);
+            expect(addCommentRes.comments).toHaveLength(1);
+
             const checkRes = await coordinator.dispatchRuntimeMessage({
                 action: 'X_CHECK_TWEETS_SEEN',
                 payload: { tweetIds: ['1850000000000000950', '1850000000000000951'] }
             });
             expect(checkRes.success).toBe(true);
             expect(checkRes.myForcedIds).toContain('1850000000000000951');
+            expect(checkRes.commentsMap['1850000000000000951']).toHaveLength(1);
+
+            const delCommentRes = await coordinator.dispatchRuntimeMessage({
+                action: 'X_DELETE_FORCE_COMMENT',
+                payload: {
+                    tweetId: '1850000000000000951',
+                    commentId: addCommentRes.comment.id
+                }
+            });
+            expect(delCommentRes.success).toBe(true);
+            expect(delCommentRes.deleted).toBe(true);
 
             const timelineRes = await coordinator.dispatchRuntimeMessage({
                 action: 'X_GET_FRIENDS_TIMELINE'

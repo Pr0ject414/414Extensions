@@ -3334,5 +3334,379 @@ describe('xLocationUI.js', () => {
             env.cleanup();
         }
     });
+
+    test('inline force comments: clicking ⚡ reveals unfocused composer below action bar, supports submit/delete/unforce & stops key propagation', () => {
+        const article = document.createElement('article');
+        article.setAttribute('data-testid', 'tweet');
+        const actionBar = document.createElement('div');
+        actionBar.setAttribute('role', 'group');
+        article.appendChild(actionBar);
+        document.body.appendChild(article);
+
+        const outsideBtn = document.createElement('button');
+        document.body.appendChild(outsideBtn);
+        outsideBtn.focus();
+
+        const onToggle = jest.fn();
+        const onAddComment = jest.fn();
+        const onDeleteComment = jest.fn();
+
+        const forceBtn = window.XLocationUI.renderForceTweetButton(
+            article,
+            '1850000000000005001',
+            { forcedByMe: false, forcedByFriends: [], onAddComment, onDeleteComment },
+            onToggle
+        );
+
+        // Initially not forced -> no comment section
+        expect(article.querySelector('.x-force-comments-section')).toBeNull();
+
+        // Click ⚡ -> section appears right after actionBar WITHOUT auto-focusing the input
+        forceBtn.click();
+        expect(onToggle).toHaveBeenCalledWith('1850000000000005001', true, article);
+
+        const section = article.querySelector('.x-force-comments-section');
+        expect(section).not.toBeNull();
+        expect(actionBar.nextElementSibling).toBe(section);
+
+        const form = section.querySelector('.x-force-comment-composer');
+        const input = section.querySelector('.x-force-comment-input');
+        const sendBtn = section.querySelector('.x-force-comment-send-btn');
+        const list = section.querySelector('.x-force-comments-list');
+
+        expect(document.activeElement).not.toBe(input);
+        expect(form.nextElementSibling).toBe(list);
+        expect(sendBtn.disabled).toBe(true);
+
+        // Keydown/keyup/keypress inside input must NOT propagate to article (X shortcuts)
+        const docKeySpy = jest.fn();
+        article.addEventListener('keydown', docKeySpy);
+        const keyEvt = new KeyboardEvent('keydown', { key: 'l', bubbles: true });
+        input.dispatchEvent(keyEvt);
+        expect(docKeySpy).not.toHaveBeenCalled();
+
+        // Type comment and submit -> clears input, invokes onAddComment, renders optimistic comment below composer
+        input.value = 'Check this thread!';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        expect(sendBtn.disabled).toBe(false);
+
+        form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        expect(onAddComment).toHaveBeenCalledWith('1850000000000005001', 'Check this thread!', article, null);
+        expect(input.value).toBe('');
+        expect(sendBtn.disabled).toBe(true);
+
+        let items = list.querySelectorAll('.x-force-comment-item');
+        expect(items.length).toBe(1);
+        expect(items[0].textContent).toContain('You');
+        expect(items[0].textContent).toContain('Check this thread!');
+
+        // Reconcile with authoritative server comments (oldest first)
+        const now = Date.now();
+        window.XLocationUI.renderForceTweetButton(
+            article,
+            '1850000000000005001',
+            {
+                forcedByMe: true,
+                forcedByFriends: ['Bob (bob@example.com)'],
+                comments: [
+                    { id: 'c_1', text: 'Check this thread!', createdAt: now, authorName: 'You', isMe: true },
+                    { id: 'c_2', text: 'Agreed!', createdAt: now + 500, authorName: 'Bob', isMe: false }
+                ],
+                onAddComment,
+                onDeleteComment
+            },
+            onToggle
+        );
+
+        items = list.querySelectorAll('.x-force-comment-item');
+        expect(items.length).toBe(2);
+        expect(items[0].querySelector('.x-force-comment-text').textContent).toBe('Check this thread!');
+        expect(items[0].querySelector('.x-force-comment-delete-btn')).not.toBeNull();
+        expect(items[1].querySelector('.x-force-comment-text').textContent).toBe('Agreed!');
+        expect(items[1].querySelector('.x-force-comment-delete-btn')).toBeNull();
+
+        // Click × delete on own comment
+        items[0].querySelector('.x-force-comment-delete-btn').click();
+        expect(onDeleteComment).toHaveBeenCalledWith('1850000000000005001', 'c_1', article);
+        expect(list.querySelectorAll('.x-force-comment-item').length).toBe(1);
+
+        // Unforce when friend still has it forced -> strips isMe comments, keeps Bob's comment
+        window.XLocationUI.renderForceTweetButton(
+            article,
+            '1850000000000005001',
+            {
+                forcedByMe: true,
+                forcedByFriends: ['Bob (bob@example.com)'],
+                comments: [
+                    { id: 'c_1', text: 'My second note', createdAt: now + 1000, authorName: 'You', isMe: true },
+                    { id: 'c_2', text: 'Agreed!', createdAt: now + 500, authorName: 'Bob', isMe: false }
+                ],
+                onAddComment,
+                onDeleteComment
+            },
+            onToggle
+        );
+        forceBtn.click();
+        expect(onToggle).toHaveBeenLastCalledWith('1850000000000005001', false, article);
+        const remainingItems = article.querySelectorAll('.x-force-comment-item');
+        expect(remainingItems.length).toBe(1);
+        expect(remainingItems[0].textContent).toContain('Agreed!');
+
+        // Unforce when NO friend has it forced -> removes entire comment section
+        window.XLocationUI.renderForceTweetButton(
+            article,
+            '1850000000000005001',
+            {
+                forcedByMe: true,
+                forcedByFriends: [],
+                comments: [{ id: 'c_1', text: 'Solo note', createdAt: now, authorName: 'You', isMe: true }],
+                onAddComment,
+                onDeleteComment
+            },
+            onToggle
+        );
+        forceBtn.click();
+        expect(article.querySelector('.x-force-comments-section')).toBeNull();
+    });
+
+    test('createFriendTweetCard, updateHydratedCardsInDOM, and ensureFriendsTimelineTab render identical inline comments, preserve draft input, and count re-forced comment notifications', () => {
+        const host = document.createElement('div');
+        document.body.appendChild(host);
+        const tabList = document.createElement('div');
+        tabList.setAttribute('role', 'tablist');
+        const forYouTab = document.createElement('a');
+        forYouTab.setAttribute('role', 'tab');
+        forYouTab.textContent = 'For you';
+        tabList.appendChild(forYouTab);
+        document.body.appendChild(tabList);
+
+        const now = Date.now();
+        const postItem = {
+            tweetId: '1850000000000005002',
+            isForced: false,
+            forcedBy: [],
+            forcedByMe: true,
+            isSeenByMe: true,
+            isDismissed: false,
+            hasUnreadFriendComments: true,
+            unreadFriendCommentIds: ['c_bob_1'],
+            friendCommentAuthors: ['Bob'],
+            comments: [
+                { id: 'c_bob_1', text: 'Re-forcing with a comment!', createdAt: now, authorName: 'Bob', isMe: false }
+            ],
+            meta: null
+        };
+
+        const timelineData = {
+            timelinePosts: [postItem],
+            unseenForcedPosts: [postItem],
+            connectedFriends: []
+        };
+
+        const tab = window.XLocationUI.ensureFriendsTimelineTab(tabList, timelineData, {});
+        expect(tab.querySelector('.x-friends-tab-badge').textContent).toBe('1');
+
+        const onAddForceComment = jest.fn();
+        const card = window.XLocationUI.createFriendTweetCard(postItem, { onAddForceComment });
+        host.appendChild(card);
+
+        expect(card.classList.contains('is-forced-card')).toBe(true);
+        expect(card.querySelector('.x-card-badge-commented').textContent).toContain('New comment from Bob');
+        const cardInput = card.querySelector('.x-force-comment-input');
+        expect(cardInput).not.toBeNull();
+        expect(card.querySelector('.x-force-comment-text').textContent).toBe('Re-forcing with a comment!');
+
+        // User starts typing draft before hydration arrives -> hydration replacement must preserve draft text
+        cardInput.value = 'Draft reply in progress';
+        cardInput.focus();
+
+        window.XLocationUI.updateHydratedCardsInDOM({
+            '1850000000000005002': {
+                id: '1850000000000005002',
+                screenName: 'author1',
+                authorName: 'Author One',
+                text: 'Hydrated post body',
+                isHydrated: true,
+                hydrationVersion: 4,
+                updatedAt: now + 100
+            }
+        });
+
+        const replacedCard = host.querySelector('article[data-tweet-id="1850000000000005002"]');
+        const replacedInput = replacedCard.querySelector('.x-force-comment-input');
+        expect(replacedInput.value).toBe('Draft reply in progress');
+        expect(replacedCard.querySelector('.x-force-comment-send-btn').disabled).toBe(false);
+    });
+
+    test('xObserver should hydrate native tweet comments via X_CHECK_TWEETS_SEEN, route X_ADD_FORCE_COMMENT/X_DELETE_FORCE_COMMENT, and re-surface dismissed banner on new friend comments', () => {
+        jest.useFakeTimers();
+        delete window.XObserverInjected;
+
+        let runtimeMessageListener = null;
+        let hasNewFriendComment = false;
+        const forcedId = '2200000000000000999';
+        const nativeId = '2200000000000000888';
+
+        const baseForcedItem = {
+            tweetId: forcedId,
+            isForced: true,
+            forcedBy: ['Alice'],
+            seenBy: ['Alice'],
+            forcedByMe: false,
+            isSeenByMe: false,
+            isDismissed: false,
+            hasUnreadFriendComments: false,
+            unreadFriendCommentIds: [],
+            comments: [],
+            meta: {
+                id: forcedId,
+                screenName: 'forced_news',
+                authorName: 'Forced News',
+                text: 'Initial forced post',
+                isHydrated: true,
+                hydrationVersion: 4
+            }
+        };
+
+        const sendMessageMock = jest.fn((msg, cb) => {
+            if (!cb) return;
+            if (msg.action === 'X_GET_FRIENDS_TIMELINE') {
+                const item = hasNewFriendComment
+                    ? {
+                        ...baseForcedItem,
+                        isSeenByMe: true,
+                        isDismissed: false,
+                        hasUnreadFriendComments: true,
+                        unreadFriendCommentIds: ['c_new_alice'],
+                        friendCommentAuthors: ['Alice'],
+                        comments: [{ id: 'c_new_alice', text: 'Look at this update!', createdAt: Date.now(), authorName: 'Alice', isMe: false }]
+                    }
+                    : { ...baseForcedItem };
+                cb({
+                    success: true,
+                    timelinePosts: [item],
+                    unseenForcedPosts: [item],
+                    connectedFriends: [{ email: 'alice@example.com', displayName: 'Alice', label: 'Alice' }]
+                });
+            } else if (msg.action === 'X_CHECK_TWEETS_SEEN') {
+                cb({
+                    success: true,
+                    seenMap: {},
+                    forcedMap: { [nativeId]: ['Alice'] },
+                    myForcedIds: [nativeId],
+                    commentsMap: {
+                        [nativeId]: [{ id: 'c_nat_1', text: 'Existing note', createdAt: Date.now(), authorName: 'You', isMe: true }]
+                    }
+                });
+            } else if (msg.action === 'X_ADD_FORCE_COMMENT') {
+                cb({
+                    success: true,
+                    tweetId: msg.payload.tweetId,
+                    comments: [
+                        { id: 'c_nat_1', text: 'Existing note', createdAt: Date.now() - 1000, authorName: 'You', isMe: true },
+                        { id: 'c_nat_2', text: msg.payload.text, createdAt: Date.now(), authorName: 'You', isMe: true }
+                    ]
+                });
+            } else if (msg.action === 'X_DELETE_FORCE_COMMENT') {
+                cb({
+                    success: true,
+                    deleted: true,
+                    comments: [{ id: 'c_nat_1', text: 'Existing note', createdAt: Date.now() - 1000, authorName: 'You', isMe: true }]
+                });
+            } else {
+                cb({ success: true });
+            }
+        });
+
+        global.chrome = {
+            runtime: {
+                id: 'test-ext-id',
+                lastError: null,
+                onMessage: { addListener: jest.fn((fn) => { runtimeMessageListener = fn; }) },
+                sendMessage: sendMessageMock
+            },
+            storage: {
+                local: {
+                    get: jest.fn((keys, cb) => {
+                        cb({
+                            isGlobalMasterSwitchEnabled: true,
+                            isXModuleEnabled: true,
+                            isXLocationEnabled: true,
+                            isXHideAdsEnabled: true,
+                            isXFriendsSyncEnabled: true,
+                            blockedCountries: [],
+                            blockedDeviceRegions: [],
+                            blockedNameFlags: []
+                        });
+                    })
+                },
+                onChanged: { addListener: jest.fn() }
+            }
+        };
+
+        const tabList = document.createElement('div');
+        tabList.setAttribute('role', 'tablist');
+        const forYouTab = document.createElement('div');
+        forYouTab.setAttribute('role', 'tab');
+        forYouTab.textContent = 'For you';
+        tabList.appendChild(forYouTab);
+        document.body.appendChild(tabList);
+
+        const primaryCol = document.createElement('div');
+        primaryCol.setAttribute('data-testid', 'primaryColumn');
+        const nativeFeed = document.createElement('section');
+        nativeFeed.setAttribute('role', 'region');
+
+        const nativeArticle = document.createElement('article');
+        nativeArticle.setAttribute('data-testid', 'tweet');
+        const nativeLink = document.createElement('a');
+        nativeLink.setAttribute('href', `/someone/status/${nativeId}`);
+        const nativeTime = document.createElement('time');
+        nativeLink.appendChild(nativeTime);
+        nativeArticle.appendChild(nativeLink);
+        const nativeActions = document.createElement('div');
+        nativeActions.setAttribute('role', 'group');
+        nativeArticle.appendChild(nativeActions);
+        nativeFeed.appendChild(nativeArticle);
+
+        primaryCol.appendChild(nativeFeed);
+        document.body.appendChild(primaryCol);
+
+        const observerScriptPath = path.resolve(__dirname, '../../x_extension/content_scripts/xObserver.js');
+        const observerScriptContent = fs.readFileSync(observerScriptPath, 'utf8');
+        eval(observerScriptContent);
+
+        jest.advanceTimersByTime(300);
+
+        // 1. Native tweet should display existing force comment hydrated via X_CHECK_TWEETS_SEEN
+        expect(nativeArticle.querySelector('.x-force-comments-section')).not.toBeNull();
+        expect(nativeArticle.querySelector('.x-force-comment-text').textContent).toBe('Existing note');
+
+        // 2. Submitting a new comment on the native tweet dispatches X_ADD_FORCE_COMMENT
+        const nativeInput = nativeArticle.querySelector('.x-force-comment-input');
+        nativeInput.value = 'Follow-up thought';
+        nativeInput.dispatchEvent(new Event('input', { bubbles: true }));
+        nativeArticle.querySelector('.x-force-comment-composer').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+        expect(sendMessageMock.mock.calls.some(([m]) => m.action === 'X_ADD_FORCE_COMMENT' && m.payload.text === 'Follow-up thought')).toBe(true);
+        expect(nativeArticle.querySelectorAll('.x-force-comment-item').length).toBe(2);
+
+        // 3. Dismissing the forced home banner removes it
+        const banner = nativeFeed.querySelector('#x-forced-home-feed');
+        expect(banner).not.toBeNull();
+        banner.querySelector('.x-forced-dismiss-btn').click();
+        expect(nativeFeed.querySelector('#x-forced-home-feed')).toBeNull();
+
+        // 4. Friend adds a new comment -> X_FRIENDS_SEEN_UPDATED re-surfaces the forced banner with the new comment!
+        hasNewFriendComment = true;
+        expect(typeof runtimeMessageListener).toBe('function');
+        runtimeMessageListener({ action: 'X_FRIENDS_SEEN_UPDATED' });
+        jest.advanceTimersByTime(100);
+
+        const resurfacedBanner = nativeFeed.querySelector('#x-forced-home-feed');
+        expect(resurfacedBanner).not.toBeNull();
+        expect(resurfacedBanner.textContent).toContain('Look at this update!');
+
+        jest.useRealTimers();
+    });
 });
 

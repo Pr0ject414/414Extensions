@@ -648,5 +648,370 @@ describe('video_speed_controller/controller.js', () => {
             }
         });
     });
+
+    describe('exclusive fullscreen / full-frame mode, occlusion, and cross-frame suppression', () => {
+        let origInnerWidth, origInnerHeight, origElementsFromPoint;
+
+        beforeEach(() => {
+            origInnerWidth = window.innerWidth;
+            origInnerHeight = window.innerHeight;
+            origElementsFromPoint = document.elementsFromPoint;
+
+            Object.defineProperty(window, 'innerWidth', { value: 1280, configurable: true, writable: true });
+            Object.defineProperty(window, 'innerHeight', { value: 720, configurable: true, writable: true });
+            Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true, writable: true });
+
+            document.body.innerHTML = '';
+            VSC.invalidateFullFrameCache();
+
+            chrome.storage.local.get.mockImplementation((keys, cb) => {
+                cb({
+                    [VSC.VSC_STORAGE_KEYS.IS_ENABLED]: true,
+                    [VSC.VSC_STORAGE_KEYS.VISIBLE]: true,
+                    [VSC.VSC_STORAGE_KEYS.GLOBAL_MASTER_SWITCH]: true,
+                    [VSC.VSC_STORAGE_KEYS.OPTIONS]: { ...VSC.DEFAULT_VSC_OPTIONS }
+                });
+            });
+            VSC.checkBlacklistAndInit();
+        });
+
+        afterEach(() => {
+            Object.defineProperty(window, 'innerWidth', { value: origInnerWidth, configurable: true, writable: true });
+            Object.defineProperty(window, 'innerHeight', { value: origInnerHeight, configurable: true, writable: true });
+            Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true, writable: true });
+            document.elementsFromPoint = origElementsFromPoint;
+            document.body.innerHTML = '';
+            VSC.invalidateFullFrameCache();
+            jest.useRealTimers();
+        });
+
+        const flushSync = async (ms = 30) => {
+            jest.advanceTimersByTime(ms);
+            await Promise.resolve();
+            await Promise.resolve();
+        };
+
+        it('hides hidden preview and smaller feed videos inside a fullscreened container and picks the main video for Spacebar', async () => {
+            jest.useFakeTimers();
+
+            const fsShell = document.createElement('div');
+            fsShell.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+
+            const hiddenPreview = document.createElement('video');
+            hiddenPreview.style.opacity = '0';
+            hiddenPreview.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+
+            const smallFeedVideo = document.createElement('video');
+            smallFeedVideo.getBoundingClientRect = () => ({ top: 20, left: 20, bottom: 220, right: 320, width: 300, height: 200 });
+
+            const mainFsVideo = document.createElement('video');
+            mainFsVideo.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+            Object.defineProperty(mainFsVideo, 'paused', { value: false, configurable: true });
+
+            fsShell.append(hiddenPreview, smallFeedVideo, mainFsVideo);
+            document.body.appendChild(fsShell);
+
+            Object.defineProperty(document, 'fullscreenElement', { value: fsShell, configurable: true, writable: true });
+
+            hiddenPreview.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            smallFeedVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            mainFsVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            document.dispatchEvent(new Event('fullscreenchange'));
+
+            await flushSync(50);
+
+            const hosts = Array.from(document.querySelectorAll('.vsc-controller-host'));
+            const mainHost = hosts.find(h => h._vscVideo === mainFsVideo);
+            const previewHost = hosts.find(h => h._vscVideo === hiddenPreview);
+            const smallHost = hosts.find(h => h._vscVideo === smallFeedVideo);
+
+            expect(mainHost).toBeDefined();
+            expect(mainHost.parentNode).toBe(fsShell);
+            expect(mainHost.classList.contains('vsc-fs-hidden')).toBe(false);
+            expect(mainHost.style.display).toBe('block');
+
+            expect(previewHost).toBeDefined();
+            expect(previewHost.parentNode).not.toBe(fsShell);
+            expect(previewHost.classList.contains('vsc-fs-hidden')).toBe(true);
+            expect(previewHost.style.display).toBe('none');
+
+            expect(smallHost).toBeDefined();
+            expect(smallHost.parentNode).not.toBe(fsShell);
+            expect(smallHost.classList.contains('vsc-fs-hidden')).toBe(true);
+            expect(smallHost.style.display).toBe('none');
+
+            expect(VSC.getSpaceTargetVideo()).toBe(mainFsVideo);
+        });
+
+        it('treats CSS full-frame and vertical 9:16 lightbox modals as exclusive and hides background feed videos without native fullscreen', async () => {
+            jest.useFakeTimers();
+
+            const bgFeedVideo = document.createElement('video');
+            bgFeedVideo.getBoundingClientRect = () => ({ top: 40, left: 40, bottom: 340, right: 440, width: 400, height: 300 });
+
+            // Vertical 9:16 lightbox video inside a fixed full-viewport modal dialog (height >= 85%, width ~ 32% -> area >= 20%)
+            const modalDialog = document.createElement('div');
+            modalDialog.setAttribute('role', 'dialog');
+            modalDialog.setAttribute('aria-modal', 'true');
+            modalDialog.style.position = 'fixed';
+            modalDialog.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+
+            const verticalModalVideo = document.createElement('video');
+            verticalModalVideo.getBoundingClientRect = () => ({ top: 0, left: 437, bottom: 720, right: 842, width: 405, height: 720 });
+
+            modalDialog.appendChild(verticalModalVideo);
+            document.body.append(bgFeedVideo, modalDialog);
+
+            bgFeedVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            verticalModalVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+
+            await flushSync(50);
+
+            const exclusive = VSC.getExclusiveFullFrameState(1280, 720);
+            expect(exclusive.active).toBe(true);
+            expect(exclusive.mode).toBe('css');
+            expect(exclusive.video).toBe(verticalModalVideo);
+
+            const hosts = Array.from(document.querySelectorAll('.vsc-controller-host'));
+            const bgHost = hosts.find(h => h._vscVideo === bgFeedVideo);
+            const modalHost = hosts.find(h => h._vscVideo === verticalModalVideo);
+
+            expect(modalHost.style.display).toBe('block');
+            expect(modalHost.classList.contains('vsc-fs-hidden')).toBe(false);
+            expect(bgHost.style.display).toBe('none');
+            expect(bgHost.classList.contains('vsc-fs-hidden')).toBe(true);
+        });
+
+        it('detects occlusion by opaque modal backdrops or foreground videos while ignoring transparent player click overlays', async () => {
+            jest.useFakeTimers();
+
+            const inlineVideo = document.createElement('video');
+            inlineVideo.getBoundingClientRect = () => ({ top: 100, left: 100, bottom: 300, right: 400, width: 300, height: 200 });
+
+            const transparentClickOverlay = document.createElement('div');
+            transparentClickOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0)';
+            transparentClickOverlay.getBoundingClientRect = () => ({ top: 100, left: 100, bottom: 300, right: 400, width: 300, height: 200 });
+
+            const opaqueBackdrop = document.createElement('div');
+            opaqueBackdrop.style.backgroundColor = 'rgba(0, 0, 0, 0.85)';
+            opaqueBackdrop.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+
+            document.body.append(inlineVideo, transparentClickOverlay, opaqueBackdrop);
+
+            // 1. Covered only by transparent click-capture surface -> NOT occluded
+            document.elementsFromPoint = jest.fn(() => [transparentClickOverlay, inlineVideo, document.body]);
+            const visInfo = VSC.getElementVisibilityInfo(inlineVideo);
+            expect(VSC.isVideoOccluded(inlineVideo, inlineVideo.getBoundingClientRect(), visInfo, 1280, 720)).toBe(false);
+
+            inlineVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            await flushSync(50);
+
+            const host = document.querySelector('.vsc-controller-host');
+            expect(host.style.display).toBe('block');
+
+            // 2. Covered by opaque modal backdrop -> occluded & hidden
+            document.elementsFromPoint = jest.fn(() => [opaqueBackdrop, inlineVideo, document.body]);
+            expect(VSC.isVideoOccluded(inlineVideo, inlineVideo.getBoundingClientRect(), visInfo, 1280, 720)).toBe(true);
+
+            // Wait past 250ms throttle / trigger visibility refresh
+            await flushSync(300);
+            expect(host.style.display).toBe('none');
+        });
+
+        it('suppresses child iframes on fullscreen and hides overlays when receiving 414-vsc-fullscreen-sync from parent frame', async () => {
+            jest.useFakeTimers();
+
+            const fsVideo = document.createElement('video');
+            fsVideo.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+
+            const adIframe = document.createElement('iframe');
+            adIframe.getBoundingClientRect = () => ({ top: 400, left: 800, bottom: 650, right: 1200, width: 400, height: 250 });
+            document.body.append(fsVideo, adIframe);
+
+            const postSpy = jest.spyOn(adIframe.contentWindow, 'postMessage').mockImplementation(() => {});
+
+            Object.defineProperty(document, 'fullscreenElement', { value: fsVideo, configurable: true, writable: true });
+            fsVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            document.dispatchEvent(new Event('fullscreenchange'));
+            await flushSync(50);
+
+            expect(postSpy).toHaveBeenCalledWith({
+                source: '414-vsc-fullscreen-sync',
+                suppressed: true
+            }, '*');
+
+            // Exiting fullscreen unsuppresses child iframe
+            Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true, writable: true });
+            fsVideo.getBoundingClientRect = () => ({ top: 40, left: 40, bottom: 240, right: 340, width: 300, height: 200 });
+            document.dispatchEvent(new Event('fullscreenchange'));
+            await flushSync(50);
+
+            expect(postSpy).toHaveBeenCalledWith({
+                source: '414-vsc-fullscreen-sync',
+                suppressed: false
+            }, '*');
+
+            // When this frame itself receives suppressed: true from its parent frame, its own video host hides immediately
+            const host = document.querySelector('.vsc-controller-host');
+            expect(host.style.display).toBe('block');
+
+            window.dispatchEvent(new MessageEvent('message', {
+                data: { source: '414-vsc-fullscreen-sync', suppressed: true }
+            }));
+            await flushSync(50);
+            expect(host.classList.contains('vsc-fs-hidden')).toBe(true);
+            expect(host.style.display).toBe('none');
+
+            // Unsuppress restores it
+            window.dispatchEvent(new MessageEvent('message', {
+                data: { source: '414-vsc-fullscreen-sync', suppressed: false }
+            }));
+            await flushSync(50);
+            expect(host.classList.contains('vsc-fs-hidden')).toBe(false);
+            expect(host.style.display).toBe('block');
+        });
+
+        it('moves overlay to top-left corner when entering native fullscreen inside an overflow-hidden feed card', async () => {
+            jest.useFakeTimers();
+
+            const inlineRect = { top: 240, left: 620, bottom: 527, right: 1130, width: 510, height: 287 };
+            const fullRect = { top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 };
+
+            const cellInnerDiv = document.createElement('div');
+            cellInnerDiv.style.transform = 'translateY(600px)';
+            cellInnerDiv.style.overflow = 'hidden';
+            cellInnerDiv.getBoundingClientRect = () => ({ top: 200, left: 600, bottom: 600, right: 1150, width: 550, height: 400 });
+
+            const tweetMediaCard = document.createElement('div');
+            tweetMediaCard.style.overflow = 'hidden';
+            tweetMediaCard.getBoundingClientRect = () => ({ ...inlineRect });
+
+            const playerWrapper = document.createElement('div');
+            playerWrapper.getBoundingClientRect = () => ({ ...inlineRect });
+
+            const video = document.createElement('video');
+            video.getBoundingClientRect = () => ({ ...inlineRect });
+
+            playerWrapper.appendChild(video);
+            tweetMediaCard.appendChild(playerWrapper);
+            cellInnerDiv.appendChild(tweetMediaCard);
+            document.body.appendChild(cellInnerDiv);
+
+            video.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            await flushSync(50);
+
+            const host = document.querySelector('.vsc-controller-host');
+            expect(host).toBeDefined();
+            expect(host.style.display).toBe('block');
+            expect(host.style.top).toBe('250px');
+            expect(host.style.left).toBe('630px');
+
+            // Enter native fullscreen within < 1500ms while ancestors remain transformed/overflow-hidden at feed coordinates
+            Object.defineProperty(document, 'fullscreenElement', { value: playerWrapper, configurable: true, writable: true });
+            playerWrapper.getBoundingClientRect = () => ({ ...fullRect });
+            video.getBoundingClientRect = () => ({ ...fullRect });
+            document.dispatchEvent(new Event('fullscreenchange'));
+
+            await flushSync(50);
+
+            expect(host.parentNode).toBe(playerWrapper);
+            expect(host.style.display).toBe('block');
+            expect(host.style.top).toBe('10px');
+            expect(host.style.left).toBe('10px');
+
+            // Exit native fullscreen back to the inline card
+            Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true, writable: true });
+            playerWrapper.getBoundingClientRect = () => ({ ...inlineRect });
+            video.getBoundingClientRect = () => ({ ...inlineRect });
+            document.dispatchEvent(new Event('fullscreenchange'));
+
+            await flushSync(50);
+
+            expect(host.parentNode).toBe(document.body);
+            expect(host.style.display).toBe('block');
+            expect(host.style.top).toBe('250px');
+            expect(host.style.left).toBe('630px');
+        });
+
+        it('moves overlay to top-left corner when expanded via CSS position:fixed inside an overflow-hidden card', async () => {
+            jest.useFakeTimers();
+
+            const inlineRect = { top: 240, left: 620, bottom: 527, right: 1130, width: 510, height: 287 };
+            const fullRect = { top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 };
+
+            const feedCard = document.createElement('div');
+            feedCard.style.overflow = 'hidden';
+            feedCard.getBoundingClientRect = () => ({ ...inlineRect });
+
+            const playerWrapper = document.createElement('div');
+            playerWrapper.getBoundingClientRect = () => ({ ...inlineRect });
+
+            const video = document.createElement('video');
+            video.getBoundingClientRect = () => ({ ...inlineRect });
+
+            playerWrapper.appendChild(video);
+            feedCard.appendChild(playerWrapper);
+            document.body.appendChild(feedCard);
+
+            video.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            await flushSync(50);
+
+            const host = document.querySelector('.vsc-controller-host');
+            expect(host.style.display).toBe('block');
+            expect(host.style.top).toBe('250px');
+            expect(host.style.left).toBe('630px');
+
+            // Expand in-place with position: fixed without fullscreenchange or childList mutations
+            playerWrapper.style.position = 'fixed';
+            playerWrapper.getBoundingClientRect = () => ({ ...fullRect });
+            video.getBoundingClientRect = () => ({ ...fullRect });
+
+            await flushSync(300);
+
+            expect(host.style.display).toBe('block');
+            expect(host.style.top).toBe('10px');
+            expect(host.style.left).toBe('10px');
+        });
+
+        it('positions overlay inside a desktop modal lightbox with reply sidebar and hides background feed videos', async () => {
+            jest.useFakeTimers();
+
+            const bgFeedVideo = document.createElement('video');
+            bgFeedVideo.getBoundingClientRect = () => ({ top: 40, left: 40, bottom: 340, right: 440, width: 400, height: 300 });
+
+            const modalDialog = document.createElement('div');
+            modalDialog.setAttribute('role', 'dialog');
+            modalDialog.setAttribute('aria-modal', 'true');
+            modalDialog.style.position = 'fixed';
+            modalDialog.getBoundingClientRect = () => ({ top: 0, left: 0, bottom: 720, right: 1280, width: 1280, height: 720 });
+
+            const modalVideo = document.createElement('video');
+            modalVideo.getBoundingClientRect = () => ({ top: 40, left: 0, bottom: 563, right: 930, width: 930, height: 523 });
+
+            modalDialog.appendChild(modalVideo);
+            document.body.append(bgFeedVideo, modalDialog);
+
+            bgFeedVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+            modalVideo.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+
+            await flushSync(50);
+
+            const exclusive = VSC.getExclusiveFullFrameState(1280, 720);
+            expect(exclusive.active).toBe(true);
+            expect(exclusive.mode).toBe('css');
+            expect(exclusive.video).toBe(modalVideo);
+
+            const hosts = Array.from(document.querySelectorAll('.vsc-controller-host'));
+            const bgHost = hosts.find(h => h._vscVideo === bgFeedVideo);
+            const modalHost = hosts.find(h => h._vscVideo === modalVideo);
+
+            expect(modalHost.style.display).toBe('block');
+            expect(modalHost.style.top).toBe('50px');
+            expect(modalHost.style.left).toBe('10px');
+            expect(modalHost.classList.contains('vsc-fs-hidden')).toBe(false);
+            expect(bgHost.classList.contains('vsc-fs-hidden')).toBe(true);
+            expect(bgHost.style.display).toBe('none');
+        });
+    });
 });
 

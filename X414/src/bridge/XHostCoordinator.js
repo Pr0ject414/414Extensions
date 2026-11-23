@@ -272,17 +272,26 @@ export class XHostCoordinator {
         const stored = await this.storageAdapter.get(['isXNotificationsEnabled']);
         if (stored.isXNotificationsEnabled === false) return;
 
-        // Hydrate any forced posts missing author/text metadata before dispatching Android notification
-        if (Array.isArray(notif.newForcedPosts) && notif.newForcedPosts.length > 0 && this.friendsSync) {
-            const missingIds = notif.newForcedPosts
-                .filter(p => p && p.tweetId && !p.meta?.text)
-                .map(p => String(p.tweetId));
-            if (missingIds.length > 0 && typeof this.friendsSync.hydrateTweets === 'function') {
+        // Hydrate any forced posts or comment targets missing author/text metadata before dispatching Android notification
+        if (this.friendsSync && typeof this.friendsSync.hydrateTweets === 'function') {
+            const itemsNeedingHydration = [];
+            if (Array.isArray(notif.newForcedPosts)) {
+                for (const p of notif.newForcedPosts) {
+                    if (p && p.tweetId && !p.meta?.text) itemsNeedingHydration.push(p);
+                }
+            }
+            if (Array.isArray(notif.newForceComments)) {
+                for (const c of notif.newForceComments) {
+                    if (c && c.tweetId && !c.meta?.permalink && !c.meta?.screenName) itemsNeedingHydration.push(c);
+                }
+            }
+            const missingIds = Array.from(new Set(itemsNeedingHydration.map(p => String(p.tweetId))));
+            if (missingIds.length > 0) {
                 try {
                     const hydrateRes = await this.friendsSync.hydrateTweets(missingIds);
                     const hydratedMap = hydrateRes?.hydrated || {};
-                    for (const item of notif.newForcedPosts) {
-                        if (item && item.tweetId && !item.meta?.text && hydratedMap[item.tweetId]) {
+                    for (const item of itemsNeedingHydration) {
+                        if (item && item.tweetId && hydratedMap[item.tweetId]) {
                             item.meta = hydratedMap[item.tweetId];
                         }
                     }
@@ -635,7 +644,8 @@ export class XHostCoordinator {
                     success: true,
                     seenMap,
                     forcedMap: syncStatus.forcedMap,
-                    myForcedIds: syncStatus.myForcedIds
+                    myForcedIds: syncStatus.myForcedIds,
+                    commentsMap: syncStatus.commentsMap || {}
                 };
             }
 
@@ -653,6 +663,26 @@ export class XHostCoordinator {
             case 'X_FRIENDS_UNFORCE_TWEET': {
                 try {
                     const res = await this.friendsSync.unforceTweet(payload?.tweetId);
+                    return { success: true, ...res };
+                } catch (err) {
+                    return { success: false, error: err.message };
+                }
+            }
+
+            case 'X_ADD_FORCE_COMMENT':
+            case 'X_FRIENDS_ADD_FORCE_COMMENT': {
+                try {
+                    const res = await this.friendsSync.addForceComment(payload?.tweetId, payload?.text, payload?.meta);
+                    return { success: true, ...res };
+                } catch (err) {
+                    return { success: false, error: err.message };
+                }
+            }
+
+            case 'X_DELETE_FORCE_COMMENT':
+            case 'X_FRIENDS_DELETE_FORCE_COMMENT': {
+                try {
+                    const res = await this.friendsSync.deleteForceComment(payload?.tweetId, payload?.commentId);
                     return { success: true, ...res };
                 } catch (err) {
                     return { success: false, error: err.message };

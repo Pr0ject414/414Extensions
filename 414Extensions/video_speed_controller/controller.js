@@ -199,10 +199,44 @@ const handleGlobalKeyDownInternal = (e) => handleKeyDown(e); // Alias to existin
 
 let lastViewportActivityMs = 0;
 const activeSyncWakeCallbacks = new Set();
+let isSuppressedByParentFrame = false;
+const suppressedIframeState = new WeakMap();
+let cachedFullFrameState = null;
+let overlayEpoch = 0;
+let videoResizeObserver = null;
+
+function ensureVideoResizeObserver() {
+    if (videoResizeObserver || typeof ResizeObserver !== 'function') return videoResizeObserver;
+    try {
+        videoResizeObserver = new ResizeObserver(() => {
+            if (isGloballyDisabled || !isInitialized) return;
+            invalidateFullFrameCache();
+            handleViewportActivity();
+        });
+    } catch (e) {
+        videoResizeObserver = null;
+    }
+    return videoResizeObserver;
+}
+
+function invalidateFullFrameCache() {
+    cachedFullFrameState = null;
+    overlayEpoch++;
+}
 
 function handleViewportActivity() {
     lastViewportActivityMs = Date.now();
     activeSyncWakeCallbacks.forEach(wake => wake());
+}
+
+function handleFullscreenChange() {
+    invalidateFullFrameCache();
+    handleViewportActivity();
+}
+
+function handleWindowResizeForVsc() {
+    invalidateFullFrameCache();
+    handleViewportActivity();
 }
 
 function init(savedSpeed) {
@@ -219,9 +253,11 @@ function init(savedSpeed) {
   // Keyboard
   document.addEventListener('keydown', handleGlobalKeyDownInternal);
 
-  // Passive scroll/resize activity wake for adaptive position sync
+  // Passive scroll/resize & fullscreen activity wake for adaptive position sync
   window.addEventListener('scroll', handleViewportActivity, { capture: true, passive: true });
-  window.addEventListener('resize', handleViewportActivity, { passive: true });
+  window.addEventListener('resize', handleWindowResizeForVsc, { passive: true });
+  document.addEventListener('fullscreenchange', handleFullscreenChange);
+  document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
 }
 
 function deinit() {
@@ -239,8 +275,16 @@ function deinit() {
     document.removeEventListener('mouseenter', handleMouseEnter, true);
     document.removeEventListener('keydown', handleGlobalKeyDownInternal);
     window.removeEventListener('scroll', handleViewportActivity, { capture: true });
-    window.removeEventListener('resize', handleViewportActivity);
+    window.removeEventListener('resize', handleWindowResizeForVsc);
+    document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
     activeSyncWakeCallbacks.clear();
+    isSuppressedByParentFrame = false;
+    if (videoResizeObserver && typeof videoResizeObserver.disconnect === 'function') {
+        videoResizeObserver.disconnect();
+    }
+    videoResizeObserver = null;
+    invalidateFullFrameCache();
 
     // Remove UI from all videos
     activeHosts.forEach(el => el.remove());
@@ -259,6 +303,7 @@ function deinit() {
 
 function observeVideos(initialSpeed) {
   pageObserver = new MutationObserver((mutations) => {
+    invalidateFullFrameCache();
     mutations.forEach((mutation) => {
       mutation.addedNodes.forEach((node) => {
         if (node.nodeType !== 1) return;
@@ -333,6 +378,96 @@ document.addEventListener('mousedown', (e) => {
 }, true);
 
 /**
+ * Checks whether `node` equals or lies inside `ancestor` across composed Shadow DOM boundaries.
+ * @param {Node} ancestor
+ * @param {Node} node
+ * @returns {boolean}
+ */
+function isNodeInsideComposed(ancestor, node) {
+    if (!ancestor || !node) return false;
+    if (ancestor === node) return true;
+    if (typeof ancestor.contains === 'function' && ancestor.contains(node)) {
+        return true;
+    }
+    let curr = node.parentElement || (node.parentNode && node.parentNode.host) || null;
+    while (curr) {
+        if (curr === ancestor) return true;
+        curr = curr.parentElement || (curr.parentNode && curr.parentNode.host) || null;
+    }
+    return false;
+}
+
+/**
+ * Safely checks whether an element is an active CSS top-layer modal (`:modal`).
+ * @param {Element} el
+ * @returns {boolean}
+ */
+function isTopLayerModalElement(el) {
+    if (!el || el.nodeType !== 1 || typeof el.matches !== 'function') return false;
+    try {
+        return el.matches(':modal');
+    } catch (e) {
+        return false;
+    }
+}
+
+function hasActiveCssEffect(val) {
+    if (!val || typeof val !== 'string') return false;
+    const trimmed = val.trim().toLowerCase();
+    return trimmed !== '' && trimmed !== 'none';
+}
+
+function createsFixedContainingBlock(style) {
+    if (!style) return false;
+    if (
+        hasActiveCssEffect(style.transform) ||
+        hasActiveCssEffect(style.translate) ||
+        hasActiveCssEffect(style.scale) ||
+        hasActiveCssEffect(style.rotate) ||
+        hasActiveCssEffect(style.perspective) ||
+        hasActiveCssEffect(style.filter) ||
+        hasActiveCssEffect(style.backdropFilter) ||
+        hasActiveCssEffect(style.webkitBackdropFilter)
+    ) {
+        return true;
+    }
+    if (typeof style.contain === 'string' && /\b(paint|layout|strict|content)\b/i.test(style.contain)) {
+        return true;
+    }
+    if (typeof style.willChange === 'string') {
+        const wc = style.willChange.trim().toLowerCase();
+        if (wc && wc !== 'auto' && /\b(transform|perspective|filter|backdrop-filter|translate|scale|rotate)\b/.test(wc)) {
+            return true;
+        }
+    }
+    if (style.contentVisibility === 'auto' || style.contentVisibility === 'hidden') {
+        return true;
+    }
+    return false;
+}
+
+function getFixedContainingBlockOffset(hostParent, fsElement) {
+    if (!hostParent || hostParent === document.body || hostParent === document.documentElement) {
+        return { top: 0, left: 0 };
+    }
+    let curr = hostParent;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+        if (curr.nodeType === 1 && typeof window.getComputedStyle === 'function') {
+            const st = window.getComputedStyle(curr);
+            if (createsFixedContainingBlock(st) && typeof curr.getBoundingClientRect === 'function') {
+                const cbRect = curr.getBoundingClientRect();
+                return { top: cbRect.top || 0, left: cbRect.left || 0 };
+            }
+        }
+        if ((fsElement && curr === fsElement) || isTopLayerModalElement(curr)) {
+            break;
+        }
+        curr = curr.parentElement || (curr.parentNode && curr.parentNode.host);
+    }
+    return { top: 0, left: 0 };
+}
+
+/**
  * Computes visibility status and visible intersection bounds for a DOM element.
  * @param {HTMLElement} el 
  * @param {boolean} [useFastCache=false] - Whether to reuse cached clipping ancestors during high-frequency rAF loops
@@ -370,41 +505,84 @@ function getElementVisibilityInfo(el, useFastCache = false, precomputedRect = nu
     let visibleLeft = Math.max(rect.left, 0);
     let visibleRight = Math.min(rect.right, viewportWidth);
 
-    // 3. Ancestor scroll/overflow clipping check (scroll containers, chat windows, modals, etc.)
+    const fsElement = (typeof document !== 'undefined' && (document.fullscreenElement || document.webkitFullscreenElement)) || null;
+    const isInsideNativeFs = Boolean(fsElement && isNodeInsideComposed(fsElement, el));
+    const rectW = Math.round(rect.width);
+    const rectH = Math.round(rect.height);
+
+    // 3. Ancestor scroll/overflow clipping check (stopping at top-layer / fixed containing block boundaries)
     const now = Date.now();
     let ancestorCache = useFastCache ? el._vscAncestorCache : null;
-    if (!ancestorCache || (now - ancestorCache.timestamp) > 1500) {
+    const cacheValid = Boolean(
+        ancestorCache &&
+        (now - ancestorCache.timestamp) <= 1500 &&
+        ancestorCache.epoch === overlayEpoch &&
+        ancestorCache.fsElement === fsElement &&
+        ancestorCache.parentNode === el.parentNode &&
+        Math.abs(rectW - ancestorCache.rectWidth) <= 2 &&
+        Math.abs(rectH - ancestorCache.rectHeight) <= 2
+    );
+
+    if (!cacheValid) {
         const clippingAncestors = [];
         let hiddenByAncestor = false;
-        let parent = el.parentElement || (el.parentNode && el.parentNode.host);
-        while (parent && parent !== document.body && parent !== document.documentElement) {
-            const parentStyle = window.getComputedStyle(parent);
+        const elStyle = typeof window.getComputedStyle === 'function' ? window.getComputedStyle(el) : null;
+        let inFixedPosition = Boolean(elStyle && elStyle.position === 'fixed');
+        const elIsTopLayer = Boolean((fsElement && el === fsElement) || isTopLayerModalElement(el));
 
-            if (
-                parentStyle.display === 'none' ||
-                parentStyle.visibility === 'hidden' ||
-                parentStyle.visibility === 'collapse' ||
-                parentStyle.opacity === '0'
-            ) {
-                hiddenByAncestor = true;
-                break;
+        if (!elIsTopLayer) {
+            let parent = el.parentElement || (el.parentNode && el.parentNode.host);
+            while (parent && parent !== document.body && parent !== document.documentElement) {
+                const parentStyle = window.getComputedStyle(parent);
+
+                if (
+                    parentStyle.display === 'none' ||
+                    parentStyle.visibility === 'hidden' ||
+                    parentStyle.visibility === 'collapse' ||
+                    parentStyle.opacity === '0'
+                ) {
+                    hiddenByAncestor = true;
+                    break;
+                }
+
+                const overflowY = parentStyle.overflowY;
+                const overflowX = parentStyle.overflowX;
+                const isClipping = (
+                    overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'hidden' || overflowY === 'clip' ||
+                    overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'hidden' || overflowX === 'clip'
+                );
+                const parentIsFixed = parentStyle.position === 'fixed';
+
+                if (inFixedPosition) {
+                    if (createsFixedContainingBlock(parentStyle)) {
+                        if (isClipping) {
+                            clippingAncestors.push(parent);
+                        }
+                        inFixedPosition = parentIsFixed;
+                    }
+                } else {
+                    if (isClipping) {
+                        clippingAncestors.push(parent);
+                    }
+                    if (parentIsFixed) {
+                        inFixedPosition = true;
+                    }
+                }
+
+                if ((isInsideNativeFs && parent === fsElement) || isTopLayerModalElement(parent)) {
+                    break;
+                }
+
+                parent = parent.parentElement || (parent.parentNode && parent.parentNode.host);
             }
-
-            const overflowY = parentStyle.overflowY;
-            const overflowX = parentStyle.overflowX;
-            const isClipping = (
-                overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'hidden' || overflowY === 'clip' ||
-                overflowX === 'auto' || overflowX === 'scroll' || overflowX === 'hidden' || overflowX === 'clip'
-            );
-
-            if (isClipping) {
-                clippingAncestors.push(parent);
-            }
-
-            parent = parent.parentElement || (parent.parentNode && parent.parentNode.host);
         }
         ancestorCache = {
             timestamp: now,
+            epoch: overlayEpoch,
+            fsElement,
+            parentNode: el.parentNode,
+            rectWidth: rectW,
+            rectHeight: rectH,
             hiddenByAncestor,
             clippingAncestors
         };
@@ -455,6 +633,357 @@ function isVideoVisibleOnScreen(video) {
     return isElementVisibleOnScreen(video);
 }
 
+function parseCssBackgroundAlpha(bgColor) {
+    if (!bgColor || typeof bgColor !== 'string') return 0;
+    const raw = bgColor.trim().toLowerCase();
+    if (!raw || raw === 'transparent') return 0;
+    const rgbaComma = raw.match(/^rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+%?)\s*\)$/);
+    if (rgbaComma) {
+        const val = rgbaComma[1];
+        return val.endsWith('%') ? parseFloat(val) / 100 : parseFloat(val);
+    }
+    const rgbSlash = raw.match(/^rgba?\([^/]+\/\s*([\d.]+%?)\s*\)$/);
+    if (rgbSlash) {
+        const val = rgbSlash[1];
+        return val.endsWith('%') ? parseFloat(val) / 100 : parseFloat(val);
+    }
+    if (raw.startsWith('rgb(')) return 1;
+    return 0;
+}
+
+function isFullFrameRect(visWidth, visHeight, vw, vh) {
+    if (vw <= 0 || vh <= 0 || visWidth <= 0 || visHeight <= 0) {
+        return { isBothFull: false, isSingleAxisFull: false };
+    }
+    const isBothFull = visWidth >= vw * 0.85 && visHeight >= vh * 0.85;
+    const isSingleAxisFull =
+        (visWidth >= vw * 0.85 || visHeight >= vh * 0.85) &&
+        (visWidth * visHeight) >= (vw * vh * 0.20);
+    return { isBothFull, isSingleAxisFull };
+}
+
+function getFullViewportOverlayInfo(el, vw, vh) {
+    const result = { insideOverlay: false, insideModalDialog: false };
+    if (!el || vw <= 0 || vh <= 0) return result;
+    let curr = el;
+    while (curr && curr !== document.body && curr !== document.documentElement) {
+        if (curr.nodeType === 1 && typeof curr.getBoundingClientRect === 'function') {
+            const cRect = curr.getBoundingClientRect();
+            if (cRect.width >= vw * 0.80 && cRect.height >= vh * 0.80) {
+                const role = (typeof curr.getAttribute === 'function' && curr.getAttribute('role')) || '';
+                const ariaModal = (typeof curr.getAttribute === 'function' && curr.getAttribute('aria-modal')) || '';
+                const isDialog = (curr.tagName === 'DIALOG' && curr.hasAttribute('open')) ||
+                    role.toLowerCase() === 'dialog' ||
+                    ariaModal.toLowerCase() === 'true';
+                let isFixed = Boolean(curr.style && curr.style.position === 'fixed');
+                if (!isFixed && typeof window.getComputedStyle === 'function') {
+                    try {
+                        isFixed = window.getComputedStyle(curr).position === 'fixed';
+                    } catch (e) {}
+                }
+                if (isFixed || isDialog) {
+                    result.insideOverlay = true;
+                    if (isDialog) {
+                        result.insideModalDialog = true;
+                        return result;
+                    }
+                }
+            }
+        }
+        curr = curr.parentElement || (curr.parentNode && curr.parentNode.host);
+    }
+    return result;
+}
+
+function isInsideFullViewportOverlay(el, vw, vh) {
+    return getFullViewportOverlayInfo(el, vw, vh).insideOverlay;
+}
+
+function isVisibleForegroundElement(el) {
+    if (!el || !el.isConnected || typeof el.getBoundingClientRect !== 'function') return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 25 || rect.height < 25) return false;
+    if (typeof window.getComputedStyle === 'function') {
+        try {
+            const st = window.getComputedStyle(el);
+            if (st.display === 'none' || st.visibility === 'hidden' || st.visibility === 'collapse') return false;
+            const op = parseFloat(st.opacity);
+            if (Number.isFinite(op) && op <= 0.05) return false;
+        } catch (e) {}
+    }
+    return true;
+}
+
+function isElementOccludingVideo(topEl, video, vw, vh) {
+    if (!topEl || topEl === video || topEl === document.body || topEl === document.documentElement) {
+        return false;
+    }
+    if (topEl.nodeType !== 1) return false;
+    if (topEl.classList && topEl.classList.contains('vsc-controller-host')) return false;
+    if (typeof topEl.closest === 'function' && topEl.closest('.vsc-controller-host')) return false;
+    if (typeof topEl.contains === 'function' && topEl.contains(video)) return false;
+    if (typeof video.contains === 'function' && video.contains(topEl)) return false;
+
+    const tag = (topEl.nodeName || '').toUpperCase();
+    if (tag === 'VIDEO' || tag === 'IFRAME') {
+        return isVisibleForegroundElement(topEl);
+    }
+
+    if (vw <= 0 || vh <= 0 || typeof topEl.getBoundingClientRect !== 'function') {
+        return false;
+    }
+    const topRect = topEl.getBoundingClientRect();
+    if (topRect.width < vw * 0.5 || topRect.height < vh * 0.5) {
+        return false;
+    }
+
+    if (typeof topEl.closest === 'function') {
+        const dialogAncestor = topEl.closest('[role="dialog"], [aria-modal="true"], dialog[open]');
+        if (dialogAncestor && (!dialogAncestor.contains || !dialogAncestor.contains(video))) {
+            return true;
+        }
+    }
+
+    if (typeof topEl.querySelectorAll === 'function') {
+        const nestedMedia = topEl.querySelectorAll('video, iframe');
+        for (let i = 0; i < nestedMedia.length; i++) {
+            const mediaEl = nestedMedia[i];
+            if (mediaEl !== video && isVisibleForegroundElement(mediaEl)) {
+                return true;
+            }
+        }
+    }
+
+    if (typeof window.getComputedStyle === 'function') {
+        try {
+            const style = window.getComputedStyle(topEl);
+            if (style.display !== 'none' && style.visibility !== 'hidden') {
+                const alpha = parseCssBackgroundAlpha(style.backgroundColor);
+                if (alpha >= 0.35) return true;
+                if (style.backgroundImage && style.backgroundImage !== 'none') return true;
+            }
+        } catch (e) {}
+    } else if (topEl.style) {
+        if (parseCssBackgroundAlpha(topEl.style.backgroundColor) >= 0.35) return true;
+        if (topEl.style.backgroundImage && topEl.style.backgroundImage !== 'none') return true;
+    }
+
+    return false;
+}
+
+function isVideoOccluded(video, rect, visInfo, vw, vh) {
+    if (typeof document.elementsFromPoint !== 'function') return false;
+    if (!video || !visInfo || !visInfo.isVisible) return false;
+    const effVw = vw || window.innerWidth || document.documentElement.clientWidth || 0;
+    const effVh = vh || window.innerHeight || document.documentElement.clientHeight || 0;
+    if (effVw <= 0 || effVh <= 0) return false;
+
+    const rawCx = (visInfo.visibleLeft + visInfo.visibleRight) / 2;
+    const rawCy = (visInfo.visibleTop + visInfo.visibleBottom) / 2;
+    const cx = Math.max(0, Math.min(effVw - 1, rawCx));
+    const cy = Math.max(0, Math.min(effVh - 1, rawCy));
+
+    let stack;
+    try {
+        stack = document.elementsFromPoint(cx, cy);
+    } catch (e) {
+        return false;
+    }
+    if (!Array.isArray(stack) || stack.length === 0) return false;
+
+    for (let i = 0; i < stack.length; i++) {
+        const topEl = stack[i];
+        if (topEl === video) {
+            return false;
+        }
+        if (isElementOccludingVideo(topEl, video, effVw, effVh)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function scoreFullFrameCandidate(el, visInfo, vw, vh) {
+    const visW = visInfo.visibleRight - visInfo.visibleLeft;
+    const visH = visInfo.visibleBottom - visInfo.visibleTop;
+    const area = Math.max(0, visW) * Math.max(0, visH);
+    const { isBothFull, isSingleAxisFull } = isFullFrameRect(visW, visH, vw, vh);
+    let score = area;
+    if (isBothFull) score += 1e12;
+    else if (isSingleAxisFull) score += 5e11;
+    if ((el.nodeName || '').toUpperCase() === 'VIDEO') {
+        if (!el.paused) score += 1e10;
+        if (el.readyState >= 1 || el.videoWidth > 0) score += 1e9;
+    }
+    return { score, area, isBothFull, isSingleAxisFull };
+}
+
+function getExclusiveFullFrameState(vw, vh, useCache = false) {
+    const effVw = vw || window.innerWidth || document.documentElement.clientWidth || 0;
+    const effVh = vh || window.innerHeight || document.documentElement.clientHeight || 0;
+    const fsElement = document.fullscreenElement || document.webkitFullscreenElement || null;
+    const now = Date.now();
+
+    if (
+        useCache &&
+        cachedFullFrameState &&
+        (now - cachedFullFrameState.timestamp) < 16 &&
+        cachedFullFrameState.fsElement === fsElement &&
+        cachedFullFrameState.vw === effVw &&
+        cachedFullFrameState.vh === effVh
+    ) {
+        return cachedFullFrameState.state;
+    }
+
+    let state = {
+        active: false,
+        mode: 'none',
+        video: null,
+        iframe: null,
+        fsElement: null
+    };
+
+    if (fsElement) {
+        const fsTag = (fsElement.nodeName || '').toUpperCase();
+        if (fsTag === 'VIDEO') {
+            state = { active: true, mode: 'native', video: fsElement, iframe: null, fsElement };
+        } else if (fsTag === 'IFRAME') {
+            state = { active: true, mode: 'native', video: null, iframe: fsElement, fsElement };
+        } else {
+            let unoccludedBest = null;
+            let fallbackBest = null;
+
+            for (const v of attachedVideos) {
+                if (!v || !v.isConnected || v.nodeName !== 'VIDEO') continue;
+                if (!isNodeInsideComposed(fsElement, v)) continue;
+                const vRect = v.getBoundingClientRect();
+                const vis = getElementVisibilityInfo(v, true, vRect);
+                if (!vis.isVisible) continue;
+
+                const metrics = scoreFullFrameCandidate(v, vis, effVw, effVh);
+                const occluded = isVideoOccluded(v, vRect, vis, effVw, effVh);
+                const cand = { el: v, ...metrics };
+                if (!occluded) {
+                    if (!unoccludedBest || cand.score > unoccludedBest.score) {
+                        unoccludedBest = cand;
+                    }
+                } else if (!fallbackBest || cand.score > fallbackBest.score) {
+                    fallbackBest = cand;
+                }
+            }
+
+            let bestIframe = null;
+            if (typeof fsElement.getElementsByTagName === 'function') {
+                const iframes = fsElement.getElementsByTagName('iframe');
+                for (let i = 0; i < iframes.length; i++) {
+                    const frame = iframes[i];
+                    if (!frame || !frame.isConnected) continue;
+                    const fRect = frame.getBoundingClientRect();
+                    const vis = getElementVisibilityInfo(frame, true, fRect);
+                    if (!vis.isVisible) continue;
+                    const metrics = scoreFullFrameCandidate(frame, vis, effVw, effVh);
+                    if ((metrics.isBothFull || metrics.isSingleAxisFull) && !isVideoOccluded(frame, fRect, vis, effVw, effVh)) {
+                        if (!bestIframe || metrics.area > bestIframe.area) {
+                            bestIframe = { el: frame, ...metrics };
+                        }
+                    }
+                }
+            }
+
+            const bestVideo = unoccludedBest || fallbackBest;
+            if (bestIframe && (!bestVideo || bestIframe.area > bestVideo.area)) {
+                state = { active: true, mode: 'native', video: null, iframe: bestIframe.el, fsElement };
+            } else {
+                state = { active: true, mode: 'native', video: bestVideo ? bestVideo.el : null, iframe: null, fsElement };
+            }
+        }
+    } else if (effVw > 0 && effVh > 0) {
+        let bestCssVideo = null;
+        for (const v of attachedVideos) {
+            if (!v || !v.isConnected || v.nodeName !== 'VIDEO') continue;
+            const vRect = v.getBoundingClientRect();
+            const vis = getElementVisibilityInfo(v, true, vRect);
+            if (!vis.isVisible) continue;
+            const metrics = scoreFullFrameCandidate(v, vis, effVw, effVh);
+            const visW = vis.visibleRight - vis.visibleLeft;
+            const visH = vis.visibleBottom - vis.visibleTop;
+            const overlayInfo = !metrics.isBothFull ? getFullViewportOverlayInfo(v, effVw, effVh) : null;
+            const qualifies = metrics.isBothFull ||
+                (overlayInfo && overlayInfo.insideOverlay && metrics.isSingleAxisFull) ||
+                (overlayInfo && overlayInfo.insideModalDialog && (visW >= effVw * 0.55 || visH >= effVh * 0.65) && metrics.area >= (effVw * effVh * 0.20));
+            if (!qualifies) continue;
+            if (isVideoOccluded(v, vRect, vis, effVw, effVh)) continue;
+            if (!bestCssVideo || metrics.score > bestCssVideo.score) {
+                bestCssVideo = { el: v, ...metrics };
+            }
+        }
+
+        if (bestCssVideo) {
+            state = { active: true, mode: 'css', video: bestCssVideo.el, iframe: null, fsElement: null };
+        } else {
+            const iframes = document.getElementsByTagName('iframe');
+            if (iframes && iframes.length > 0) {
+                let bestCssIframe = null;
+                for (let i = 0; i < iframes.length; i++) {
+                    const frame = iframes[i];
+                    if (!frame || !frame.isConnected) continue;
+                    const fRect = frame.getBoundingClientRect();
+                    const vis = getElementVisibilityInfo(frame, true, fRect);
+                    if (!vis.isVisible) continue;
+                    const metrics = scoreFullFrameCandidate(frame, vis, effVw, effVh);
+                    if ((metrics.isBothFull || metrics.isSingleAxisFull) && isInsideFullViewportOverlay(frame, effVw, effVh)) {
+                        if (!isVideoOccluded(frame, fRect, vis, effVw, effVh)) {
+                            if (!bestCssIframe || metrics.area > bestCssIframe.area) {
+                                bestCssIframe = { el: frame, ...metrics };
+                            }
+                        }
+                    }
+                }
+                if (bestCssIframe) {
+                    state = { active: true, mode: 'css', video: null, iframe: bestCssIframe.el, fsElement: null };
+                }
+            }
+        }
+    }
+
+    if (useCache) {
+        cachedFullFrameState = { timestamp: now, fsElement, vw: effVw, vh: effVh, state };
+    }
+    return state;
+}
+
+function syncChildIframeSuppression(exclusiveState) {
+    const iframes = document.getElementsByTagName('iframe');
+    if (!iframes || iframes.length === 0) return;
+
+    for (let i = 0; i < iframes.length; i++) {
+        const frame = iframes[i];
+        if (!frame || !frame.contentWindow) continue;
+        const isAllowedFsFrame = Boolean(
+            exclusiveState &&
+            exclusiveState.active &&
+            (
+                frame === exclusiveState.iframe ||
+                isNodeInsideComposed(exclusiveState.fsElement, frame)
+            )
+        );
+        const shouldSuppress = Boolean(
+            isSuppressedByParentFrame ||
+            (exclusiveState && exclusiveState.active && !isAllowedFsFrame)
+        );
+        const prev = suppressedIframeState.get(frame) || false;
+        if (prev !== shouldSuppress) {
+            suppressedIframeState.set(frame, shouldSuppress);
+            try {
+                frame.contentWindow.postMessage({
+                    source: '414-vsc-fullscreen-sync',
+                    suppressed: shouldSuppress
+                }, '*');
+            } catch (e) {}
+        }
+    }
+}
+
 function attachController(video, initialSpeed) {
     if (video.dataset.vscAttached) return;
 
@@ -464,6 +993,12 @@ function attachController(video, initialSpeed) {
     }
     video.dataset.vscAttached = 'true';
     attachedVideos.add(video);
+    const resizeObserver = ensureVideoResizeObserver();
+    if (resizeObserver && typeof resizeObserver.observe === 'function') {
+        try {
+            resizeObserver.observe(video);
+        } catch (e) {}
+    }
 
     // Apply initial speed if provided and valid
     if (initialSpeed && initialSpeed !== 1.0) {
@@ -484,6 +1019,11 @@ function attachController(video, initialSpeed) {
     host.style.pointerEvents = 'none';
     host.style.top = '-9999px';
     host.style.left = '-9999px';
+    host.style.right = 'auto';
+    host.style.bottom = 'auto';
+    host.style.margin = '0';
+    host.style.padding = '0';
+    host.style.transform = 'none';
 
     // Shadow DOM
     const shadow = host.attachShadow({ mode: 'open' });
@@ -548,7 +1088,8 @@ function attachController(video, initialSpeed) {
         display: flex;
       }
 
-      :host(.vsc-hidden) .vsc-controller {
+      :host(.vsc-hidden) .vsc-controller,
+      :host(.vsc-fs-hidden) .vsc-controller {
           display: none;
       }
     `;
@@ -671,6 +1212,7 @@ function attachController(video, initialSpeed) {
     let lastDragX = NaN;
     let lastDragY = NaN;
     let lastVisibilityCheckMs = 0;
+    let lastCheckEpoch = -1;
     let lastShouldShow = false;
     let lastCssVisible = false;
     let lastClipTop = 0;
@@ -680,6 +1222,8 @@ function attachController(video, initialSpeed) {
     let lastHostDisplay = '';
     let lastHostTop = '';
     let lastHostLeft = '';
+    let hostWriteSeq = 0;
+    let hasPendingHostWrite = false;
     let idleSyncTimer = null;
     let rafPending = false;
 
@@ -728,6 +1272,11 @@ function attachController(video, initialSpeed) {
                 clearTimeout(idleSyncTimer);
                 idleSyncTimer = null;
             }
+            if (videoResizeObserver && typeof videoResizeObserver.unobserve === 'function') {
+                try {
+                    videoResizeObserver.unobserve(video);
+                } catch (e) {}
+            }
             activeSyncWakeCallbacks.delete(wakeSync);
             host.remove();
             activeHosts.delete(host);
@@ -740,35 +1289,47 @@ function attachController(video, initialSpeed) {
             return;
         }
 
-        const fsElement = document.fullscreenElement || document.webkitFullscreenElement;
-        const isRelatedToFS = !!(fsElement && (video === fsElement || fsElement.contains(video)));
-        const anotherVideoFS = !!(fsElement && !isRelatedToFS);
-
         const rect = video.getBoundingClientRect();
         const vw = window.innerWidth || document.documentElement.clientWidth || 0;
         const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-        const isMaximized = (rect.width >= vw * 0.85 && rect.height >= vh * 0.85);
-        const isFS = isRelatedToFS || isMaximized;
+        const exclusiveState = getExclusiveFullFrameState(vw, vh, true);
+        syncChildIframeSuppression(exclusiveState);
 
-        // Reset drag offset when entering or exiting fullscreen/maximized view
+        const fsElement = exclusiveState.fsElement;
+        const isExclusiveWinner = Boolean(exclusiveState.active && video === exclusiveState.video);
+        const isSuppressedByExclusive = Boolean(isSuppressedByParentFrame || (exclusiveState.active && !isExclusiveWinner));
+        const isRelatedToFS = Boolean(fsElement && isExclusiveWinner && isNodeInsideComposed(fsElement, video));
+        const isFS = isExclusiveWinner;
+
+        // Reset drag offset and visibility cache when entering or exiting exclusive full-frame view
         if (isFS !== wasFS) {
             wasFS = isFS;
             dragOffset = { x: 0, y: 0 };
+            lastVisibilityCheckMs = 0;
+            lastCheckEpoch = -1;
         }
 
-        // 1. Fullscreen Handling
+        // 1. Fullscreen / Exclusive Full-Frame Handling
         const targetParent = isRelatedToFS ? fsElement : (document.body || document.documentElement);
         if (targetParent && host.parentNode !== targetParent) {
             targetParent.appendChild(host);
+            lastHostDisplay = '';
+            lastHostTop = '';
+            lastHostLeft = '';
         }
 
-        if (anotherVideoFS !== lastAnotherVideoFS) {
-            lastAnotherVideoFS = anotherVideoFS;
-            host.classList.toggle('vsc-fs-hidden', anotherVideoFS);
+        if (isSuppressedByExclusive !== lastAnotherVideoFS) {
+            lastAnotherVideoFS = isSuppressedByExclusive;
+            host.classList.toggle('vsc-fs-hidden', isSuppressedByExclusive);
+            if (!isSuppressedByExclusive) {
+                lastVisibilityCheckMs = 0;
+            }
         }
 
-        if (anotherVideoFS) {
-            if (lastHostDisplay !== 'none') {
+        if (isSuppressedByExclusive) {
+            hostWriteSeq++;
+            hasPendingHostWrite = false;
+            if (lastHostDisplay !== 'none' || host.style.display !== 'none') {
                 host.style.display = 'none';
                 lastHostDisplay = 'none';
             }
@@ -794,11 +1355,12 @@ function attachController(video, initialSpeed) {
             const refLeft = (anchorInfo && anchorInfo.isVisible) ? anchorInfo.visibleLeft : (anchorRect ? anchorRect.left : 10);
             posTop = refTop + 10 + dragOffset.y;
             posLeft = refLeft + dragOffset.x;
-        } else if (isFS) {
-            // Fullscreen or Maximized: position cleanly relative to top-left of video
-            shouldShow = (rect.width > 0 && rect.height > 0) || getElementVisibilityInfo(video, true, rect).isVisible;
-            posTop = rect.top + 10 + dragOffset.y;
-            posLeft = rect.left + 10 + dragOffset.x;
+        } else if (isExclusiveWinner) {
+            // Winning Native Fullscreen or CSS Full-Frame video: enforce true visibility and clamp to visible bounds
+            const visInfo = getElementVisibilityInfo(video, true, rect);
+            shouldShow = visInfo.isVisible;
+            posTop = visInfo.visibleTop + 10 + dragOffset.y;
+            posLeft = visInfo.visibleLeft + 10 + dragOffset.x;
         } else {
             // Fast off-screen rejection before any DOM/style checks
             if (rect.width <= 0 || rect.height <= 0 || rect.bottom <= 0 || rect.top >= vh || rect.right <= 0 || rect.left >= vw) {
@@ -806,6 +1368,7 @@ function attachController(video, initialSpeed) {
                 lastShouldShow = false;
             } else {
                 const now = Date.now();
+                const epochMatch = (lastCheckEpoch === overlayEpoch);
                 const sizeUnchanged = (
                     rect.width === lastRectWidth &&
                     rect.height === lastRectHeight
@@ -821,9 +1384,9 @@ function attachController(video, initialSpeed) {
                 posTop = rect.top + 10 + dragOffset.y;
                 posLeft = rect.left + 10 + dragOffset.x;
 
-                if (!isDragging && positionUnchanged && (now - lastVisibilityCheckMs) < 250) {
+                if (!isDragging && epochMatch && positionUnchanged && (now - lastVisibilityCheckMs) < 250) {
                     shouldShow = lastShouldShow;
-                } else if (!isDragging && sizeUnchanged && (now - lastVisibilityCheckMs) < 250) {
+                } else if (!isDragging && epochMatch && sizeUnchanged && (now - lastVisibilityCheckMs) < 250) {
                     // During scroll, rect.top/left shift while rect.width/height remain constant.
                     // Avoid expensive checkVisibility() & ancestor DOM reads on intermediate scroll frames.
                     lastRectTop = rect.top;
@@ -851,11 +1414,14 @@ function attachController(video, initialSpeed) {
                     lastDragX = dragOffset.x;
                     lastDragY = dragOffset.y;
                     lastVisibilityCheckMs = now;
+                    lastCheckEpoch = overlayEpoch;
 
                     // Normal Feed / Inline Video: Lock 1:1 relative to video coordinates
                     const visInfo = getElementVisibilityInfo(video, true, rect);
-                    lastCssVisible = visInfo.isVisible;
-                    if (visInfo.isVisible) {
+                    const occluded = visInfo.isVisible ? isVideoOccluded(video, rect, visInfo, vw, vh) : false;
+                    const effectivelyVisible = visInfo.isVisible && !occluded;
+                    lastCssVisible = effectivelyVisible;
+                    if (effectivelyVisible) {
                         lastClipTop = visInfo.visibleTop > rect.top ? visInfo.visibleTop : 0;
                         lastClipBottom = visInfo.visibleBottom < rect.bottom ? visInfo.visibleBottom : vh;
                         lastClipLeft = visInfo.visibleLeft > rect.left ? visInfo.visibleLeft : 0;
@@ -867,9 +1433,9 @@ function attachController(video, initialSpeed) {
                         lastClipRight = vw;
                     }
 
-                    // Hide overlay when its position on the video is scrolled out of view or under sticky headers
+                    // Hide overlay when its position on the video is scrolled out of view, occluded, or under sticky headers
                     const isPosVisible = (
-                        visInfo.isVisible &&
+                        effectivelyVisible &&
                         posTop >= visInfo.visibleTop - 5 &&
                         posTop <= visInfo.visibleBottom - 15 &&
                         posLeft >= visInfo.visibleLeft - 5 &&
@@ -881,25 +1447,43 @@ function attachController(video, initialSpeed) {
             }
         }
 
-        const nextDisplay = shouldShow ? 'block' : 'none';
-        const nextTop = shouldShow ? `${Math.round(posTop)}px` : lastHostTop;
-        const nextLeft = shouldShow ? `${Math.round(posLeft)}px` : lastHostLeft;
-        const needsDisplayWrite = lastHostDisplay !== nextDisplay;
-        const needsTopWrite = shouldShow && lastHostTop !== nextTop;
-        const needsLeftWrite = shouldShow && lastHostLeft !== nextLeft;
+        const cbOffset = shouldShow ? getFixedContainingBlockOffset(host.parentNode, fsElement) : { top: 0, left: 0 };
+        const adjustedTop = posTop - cbOffset.top;
+        const adjustedLeft = posLeft - cbOffset.left;
+
+        const targetDisplay = shouldShow ? 'block' : 'none';
+        const targetTop = shouldShow ? `${Math.round(adjustedTop)}px` : lastHostTop;
+        const targetLeft = shouldShow ? `${Math.round(adjustedLeft)}px` : lastHostLeft;
+        const needsDisplayWrite = lastHostDisplay !== targetDisplay;
+        const needsTopWrite = shouldShow && lastHostTop !== targetTop;
+        const needsLeftWrite = shouldShow && lastHostLeft !== targetLeft;
 
         if (needsDisplayWrite || needsTopWrite || needsLeftWrite) {
-            lastHostDisplay = nextDisplay;
-            if (shouldShow) {
-                lastHostTop = nextTop;
-                lastHostLeft = nextLeft;
-            }
+            const writePos = shouldShow;
+            hasPendingHostWrite = true;
+            const writeSeq = ++hostWriteSeq;
             Promise.resolve().then(() => {
-                if (!host.isConnected) return;
-                if (needsDisplayWrite) host.style.display = nextDisplay;
-                if (needsTopWrite) host.style.top = nextTop;
-                if (needsLeftWrite) host.style.left = nextLeft;
+                if (!host.isConnected || writeSeq !== hostWriteSeq) return;
+                hasPendingHostWrite = false;
+                if (lastHostDisplay !== targetDisplay) {
+                    host.style.display = targetDisplay;
+                    lastHostDisplay = targetDisplay;
+                }
+                if (writePos) {
+                    if (lastHostTop !== targetTop) {
+                        host.style.top = targetTop;
+                        lastHostTop = targetTop;
+                    }
+                    if (lastHostLeft !== targetLeft) {
+                        host.style.left = targetLeft;
+                        lastHostLeft = targetLeft;
+                    }
+                }
             });
+        } else if (hasPendingHostWrite) {
+            // Cancel an earlier uncommitted microtask so stale coordinates cannot overwrite the current state.
+            hostWriteSeq++;
+            hasPendingHostWrite = false;
         }
 
         scheduleNextSync();
@@ -1130,15 +1714,27 @@ function isCrunchyrollHost() {
 
 function getSpaceTargetVideo() {
     const videos = Array.from(attachedVideos);
+    const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0;
+    const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
 
-    // 1. Priority: Fullscreen Video
+    // 1. Priority: Fullscreen or CSS Full-Frame Video
     const fsElement = document.fullscreenElement || document.webkitFullscreenElement;
     if (fsElement) {
         if (fsElement.nodeName === 'VIDEO' || (currentConfig.options.audio && fsElement.nodeName === 'AUDIO')) {
             return fsElement;
         }
-        const fsVideo = videos.find(v => fsElement.contains(v));
+        const exclusive = getExclusiveFullFrameState(vw, vh, false);
+        if (exclusive.active && exclusive.video && isNodeInsideComposed(fsElement, exclusive.video)) {
+            return exclusive.video;
+        }
+        const fsVideo = videos.find(v => isNodeInsideComposed(fsElement, v) && (v.nodeName !== 'VIDEO' || isVideoVisibleOnScreen(v))) ||
+            videos.find(v => isNodeInsideComposed(fsElement, v));
         if (fsVideo) return fsVideo;
+    }
+
+    const cssExclusive = getExclusiveFullFrameState(vw, vh, false);
+    if (cssExclusive.active && cssExclusive.video) {
+        return cssExclusive.video;
     }
 
     // 2. Explicitly clicked video (must still be connected and visible)
@@ -1190,7 +1786,7 @@ function getCrunchyrollBridgeWindows() {
     for (let i = 0; i < iframes.length; i++) {
         const frame = iframes[i];
         if (!frame.contentWindow) continue;
-        if (fsElement && (fsElement === frame || fsElement.contains(frame))) {
+        if (fsElement && isNodeInsideComposed(fsElement, frame)) {
             return [frame.contentWindow];
         }
         const rect = frame.getBoundingClientRect();
@@ -1322,7 +1918,22 @@ function cancelSpacePress() {
 window.addEventListener('message', (e) => {
     if (isGloballyDisabled || !isInitialized) return;
     const data = e && e.data;
-    if (!data || data.source !== '414-vsc-space-bridge') return;
+    if (!data) return;
+
+    if (data.source === '414-vsc-fullscreen-sync') {
+        const nextSuppressed = Boolean(data.suppressed);
+        if (isSuppressedByParentFrame !== nextSuppressed) {
+            isSuppressedByParentFrame = nextSuppressed;
+            invalidateFullFrameCache();
+            const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0;
+            const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+            syncChildIframeSuppression(getExclusiveFullFrameState(vw, vh, false));
+            handleViewportActivity();
+        }
+        return;
+    }
+
+    if (data.source !== '414-vsc-space-bridge') return;
 
     if (data.action === 'keydown') {
         let target = spaceTargetVideo || getSpaceTargetVideo();
@@ -1640,14 +2251,30 @@ function handleKeyDown(e) {
     // Prioritize playing, then active/anchored
     let target = null;
 
-    // 1. Priority: Fullscreen
+    // 1. Priority: Fullscreen / CSS Full-Frame
     const fsElement = document.fullscreenElement || document.webkitFullscreenElement;
     if (fsElement) {
          if (fsElement.nodeName === 'VIDEO' || (currentConfig.options.audio && fsElement.nodeName === 'AUDIO')) {
              target = fsElement;
          } else {
-             target = videos.find(v => fsElement.contains(v));
+             const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0;
+             const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+             const exclusive = getExclusiveFullFrameState(vw, vh, false);
+             if (exclusive.active && exclusive.video && isNodeInsideComposed(fsElement, exclusive.video)) {
+                 target = exclusive.video;
+             } else {
+                 target = videos.find(v => isNodeInsideComposed(fsElement, v) && (v.nodeName !== 'VIDEO' || isVideoVisibleOnScreen(v))) ||
+                     videos.find(v => isNodeInsideComposed(fsElement, v));
+             }
          }
+    }
+    if (!target) {
+        const vw = window.innerWidth || (document.documentElement && document.documentElement.clientWidth) || 0;
+        const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+        const exclusive = getExclusiveFullFrameState(vw, vh, false);
+        if (exclusive.active && exclusive.video) {
+            target = exclusive.video;
+        }
     }
 
     // 2. Playing
@@ -1715,6 +2342,10 @@ if (typeof window !== 'undefined') {
         isTypingOrEditing,
         isInteractiveControlFocused,
         getSpaceTargetVideo,
+        getExclusiveFullFrameState,
+        isVideoOccluded,
+        isInsideFullViewportOverlay,
+        invalidateFullFrameCache,
         isMouseOverrideActive: () => overrideTriggeredByMouse,
         isKeyOverrideActive: () => overrideTriggeredByKey
     };

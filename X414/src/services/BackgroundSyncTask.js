@@ -77,6 +77,7 @@ export async function ensureAndroidNotificationChannels(notificationsApi = null)
 export function buildNotificationsFromSyncDiff(syncDiff = {}) {
     const notifications = [];
     const newForced = Array.isArray(syncDiff.newForcedPosts) ? syncDiff.newForcedPosts : [];
+    const newForceComments = Array.isArray(syncDiff.newForceComments) ? syncDiff.newForceComments : [];
     const newInvites = Array.isArray(syncDiff.newInvites) ? syncDiff.newInvites : [];
     const newXNotifs = Array.isArray(syncDiff.newXNotifications) ? syncDiff.newXNotifications : [];
 
@@ -86,18 +87,46 @@ export function buildNotificationsFromSyncDiff(syncDiff = {}) {
             : 'A friend';
         const authorPrefix = item.meta?.screenName ? `@${item.meta.screenName}: ` : '';
         const rawText = item.meta?.text ? `${authorPrefix}${item.meta.text}` : '';
-        const snippet = rawText
-            ? (rawText.length > 110 ? `${rawText.slice(0, 107)}...` : rawText)
-            : `Tap to view forced post #${item.tweetId} in X414`;
+        const commentText = item.latestComment && item.latestComment.text
+            ? String(item.latestComment.text).trim()
+            : '';
+        let body;
+        if (commentText) {
+            const combined = rawText ? `💬 "${commentText}" — ${rawText}` : `💬 "${commentText}"`;
+            body = combined.length > 140 ? `${combined.slice(0, 137)}...` : combined;
+        } else {
+            body = rawText
+                ? (rawText.length > 110 ? `${rawText.slice(0, 107)}...` : rawText)
+                : `Tap to view forced post #${item.tweetId} in X414`;
+        }
         notifications.push({
             title: `⚡ Forced by ${sender}`,
-            body: snippet,
+            body,
             channelId: X414_NOTIFICATION_CHANNEL_ID,
             color: '#F59E0B',
             data: {
                 type: 'forced_post',
                 tweetId: item.tweetId,
                 url: item.meta?.permalink || `https://x.com/i/status/${item.tweetId}`
+            }
+        });
+    }
+
+    for (const commentItem of newForceComments) {
+        if (!commentItem || !commentItem.tweetId || !commentItem.text) continue;
+        const sender = commentItem.authorLabel || commentItem.authorName || 'A friend';
+        const cText = String(commentItem.text).trim();
+        const snippet = cText.length > 140 ? `${cText.slice(0, 137)}...` : cText;
+        notifications.push({
+            title: `💬 ${sender} commented on a forced post`,
+            body: snippet,
+            channelId: X414_NOTIFICATION_CHANNEL_ID,
+            color: '#F59E0B',
+            data: {
+                type: 'force_comment',
+                tweetId: commentItem.tweetId,
+                commentId: commentItem.commentId,
+                url: commentItem.meta?.permalink || `https://x.com/i/status/${commentItem.tweetId}`
             }
         });
     }
@@ -277,6 +306,7 @@ export async function executeBackgroundSyncPass(getCoordinatorFn = activeCoordin
         const hasNew = Boolean(
             diff && (
                 (Array.isArray(diff.newForcedPosts) && diff.newForcedPosts.length > 0) ||
+                (Array.isArray(diff.newForceComments) && diff.newForceComments.length > 0) ||
                 (Array.isArray(diff.newInvites) && diff.newInvites.length > 0)
             )
         );

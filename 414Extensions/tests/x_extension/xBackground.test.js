@@ -201,4 +201,53 @@ describe('xBackground', () => {
             forced: false
         }));
     });
+
+    test('X_ADD_FORCE_COMMENT and X_DELETE_FORCE_COMMENT should route to friendsSync', async () => {
+        global.chrome.storage.local.get.mockResolvedValue({});
+        global.chrome.storage.local.set.mockResolvedValue();
+
+        const sendResponseForce = jest.fn();
+        handleMessage({
+            action: 'X_FORCE_TWEET_TO_FRIENDS',
+            payload: {
+                tweetId: '1850000000000000222',
+                meta: { screenName: 'user414', text: 'Post for comment' }
+            }
+        }, {}, sendResponseForce);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(sendResponseForce).toHaveBeenCalledWith(expect.objectContaining({ success: true, forced: true }));
+
+        const sendResponseAddComment = jest.fn();
+        const handledAdd = handleMessage({
+            action: 'X_ADD_FORCE_COMMENT',
+            payload: {
+                tweetId: '1850000000000000222',
+                text: 'Optional comment after forcing!'
+            }
+        }, {}, sendResponseAddComment);
+        expect(handledAdd).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(sendResponseAddComment).toHaveBeenCalledWith(expect.objectContaining({
+            success: true,
+            tweetId: '1850000000000000222',
+            comment: expect.objectContaining({ text: 'Optional comment after forcing!' })
+        }));
+
+        const addedCommentId = sendResponseAddComment.mock.calls[0][0].comment.id;
+        const sendResponseDeleteComment = jest.fn();
+        const handledDel = handleMessage({
+            action: 'X_DELETE_FORCE_COMMENT',
+            payload: {
+                tweetId: '1850000000000000222',
+                commentId: addedCommentId
+            }
+        }, {}, sendResponseDeleteComment);
+        expect(handledDel).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(sendResponseDeleteComment).toHaveBeenCalledWith(expect.objectContaining({
+            success: true,
+            deleted: true,
+            comments: []
+        }));
+    });
 });

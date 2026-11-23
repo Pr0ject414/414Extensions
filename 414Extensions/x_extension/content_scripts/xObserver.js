@@ -21,7 +21,7 @@
     const failedHydrationUntil = new Map(); // tweetId -> timestampMs
     const dwellTimers = new Map(); // tweetId -> timerId
     const locallyMarkedSeen = new Set();
-    const dismissedForcedLocalSet = new Set();
+    const dismissedLocalCommentIdsMap = new Map(); // tweetId -> Set<string>
     const pendingSeenQueue = new Set();
     const pendingSeenMetaMap = {}; // tweetId -> TweetMeta
     let cachedSettings = null;
@@ -149,6 +149,7 @@
         // 1. Primary: look for the timestamp permalink in the outer tweet header
         const timeLinks = article.querySelectorAll('a[href*="/status/"] time');
         for (const timeEl of timeLinks) {
+            if (timeEl.closest && timeEl.closest('.x-force-comments-section')) continue;
             const link = timeEl.closest('a[href*="/status/"]');
             if (link) {
                 const href = link.getAttribute('href') || '';
@@ -160,6 +161,7 @@
         // 2. Fallback: any /status/ link inside the article
         const statusLinks = article.querySelectorAll('a[href*="/status/"]');
         for (const link of statusLinks) {
+            if (link.closest && link.closest('.x-force-comments-section')) continue;
             const href = link.getAttribute('href') || '';
             const match = href.match(/\/status\/(\d+)/);
             if (match && match[1]) return match[1];
@@ -211,7 +213,9 @@
         const id = tweetId || extractTweetIdFromArticle(article);
         if (!id) return null;
 
-        const allHeaders = article.querySelectorAll('[data-testid="User-Name"], [data-testid="UserName"]');
+        const isInForceComments = (el) => Boolean(el && el.closest && el.closest('.x-force-comments-section'));
+        const allHeaders = Array.from(article.querySelectorAll('[data-testid="User-Name"], [data-testid="UserName"]'))
+            .filter(el => !isInForceComments(el));
         const headerElem = allHeaders[0] || null;
         const qHeaderFromList = allHeaders.length > 1 ? allHeaders[1] : null;
 
@@ -237,6 +241,7 @@
         if (!quoteCard) {
             const roleLinks = article.querySelectorAll('[role="link"]');
             for (const rl of roleLinks) {
+                if (isInForceComments(rl)) continue;
                 if (headerElem && rl.contains && rl.contains(headerElem)) continue;
                 if (rl.querySelector && (rl.querySelector('[data-testid="User-Name"], [data-testid="UserName"]') || rl.querySelector('[data-testid="tweetText"]'))) {
                     quoteCard = rl;
@@ -252,6 +257,7 @@
         let avatarUrl = '';
         const avatarImgs = article.querySelectorAll('[data-testid^="UserAvatar-Container-"] img[src], img[src*="profile_images"], img.x-friend-card-avatar');
         for (const img of avatarImgs) {
+            if (isInForceComments(img)) continue;
             if (quoteCard && quoteCard.contains && quoteCard.contains(img)) continue;
             avatarUrl = (img.getAttribute('src') || '').replace('_normal.', '_bigger.');
             if (avatarUrl) break;
@@ -260,6 +266,7 @@
         let createdAt = null;
         const timeElements = article.querySelectorAll('a[href*="/status/"] time[datetime], time[datetime]');
         for (const tEl of timeElements) {
+            if (isInForceComments(tEl)) continue;
             if (quoteCard && quoteCard.contains && quoteCard.contains(tEl)) continue;
             createdAt = tEl.getAttribute('datetime') || null;
             if (createdAt) break;
@@ -268,6 +275,7 @@
         let text = '';
         const tweetTextNodes = article.querySelectorAll('[data-testid="tweetText"]');
         for (const tNode of tweetTextNodes) {
+            if (isInForceComments(tNode)) continue;
             if (quoteCard && quoteCard.contains && quoteCard.contains(tNode)) continue;
             text = extractTextWithEmojiAlts(tNode);
             if (text) break;
@@ -277,6 +285,7 @@
         const media = [];
         const photoImgs = article.querySelectorAll('[data-testid="tweetPhoto"] img[src]');
         for (const img of photoImgs) {
+            if (isInForceComments(img)) continue;
             if (quoteCard && quoteCard.contains && quoteCard.contains(img)) continue;
             const src = img.getAttribute('src') || '';
             if (src && !src.includes('profile_images') && !src.includes('/emoji/')) {
@@ -285,6 +294,7 @@
         }
         const videos = article.querySelectorAll('video');
         for (const vid of videos) {
+            if (isInForceComments(vid)) continue;
             if (quoteCard && quoteCard.contains && quoteCard.contains(vid)) continue;
             const poster = vid.getAttribute('poster') || '';
             const src = vid.getAttribute('src') || '';
@@ -478,6 +488,109 @@
         }
     }
 
+    function isLocallyDismissedPost(postItem) {
+        if (!postItem) return false;
+        const tid = String(postItem.tweetId || postItem);
+        if (!tid || !dismissedLocalCommentIdsMap.has(tid)) return false;
+        const dismissedCids = dismissedLocalCommentIdsMap.get(tid);
+        const comments = Array.isArray(postItem.comments) ? postItem.comments : [];
+        for (let i = 0; i < comments.length; i++) {
+            const c = comments[i];
+            if (c && !c.isMe && c.id && !dismissedCids.has(c.id)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function recordLocalDismissal(tid, explicitCommentIds = null) {
+        const normId = String(tid || '').trim();
+        if (!normId) return;
+        let set = dismissedLocalCommentIdsMap.get(normId);
+        if (!set) {
+            set = new Set();
+            dismissedLocalCommentIdsMap.set(normId, set);
+        }
+        if (Array.isArray(explicitCommentIds)) {
+            explicitCommentIds.forEach(cid => {
+                if (cid) set.add(String(cid));
+            });
+        }
+        const lists = [
+            cachedTimelineData && cachedTimelineData.unseenForcedPosts,
+            cachedTimelineData && cachedTimelineData.timelinePosts
+        ];
+        for (const list of lists) {
+            if (!Array.isArray(list)) continue;
+            const post = list.find(p => p && String(p.tweetId) === normId);
+            if (post && Array.isArray(post.comments)) {
+                post.comments.forEach(c => {
+                    if (c && !c.isMe && c.id) set.add(c.id);
+                });
+            }
+        }
+    }
+
+    function updateAllDomCommentSections(tweetId, comments, isForcedFlag = true, fallbackMeta = null) {
+        if (!window.XLocationUI || typeof window.XLocationUI.renderForceCommentsSection !== 'function') return;
+        const cards = document.querySelectorAll(`article[data-tweet-id="${tweetId}"], article[data-x-tweet-id="${tweetId}"]`);
+        cards.forEach(card => {
+            const btn = card.querySelector('.x-force-friend-btn');
+            const isForced = Boolean(
+                isForcedFlag ||
+                (btn && (btn.classList.contains('is-forced') || btn.classList.contains('is-friend-forced'))) ||
+                card.classList.contains('is-forced-card')
+            );
+            window.XLocationUI.renderForceCommentsSection(card, tweetId, {
+                isForced,
+                comments,
+                onAddComment: handleAddForceComment,
+                onDeleteComment: handleDeleteForceComment,
+                meta: fallbackMeta || (card._xPostItem && card._xPostItem.meta) || null
+            });
+        });
+    }
+
+    function handleAddForceComment(tweetId, text, article = null, fallbackMeta = null) {
+        if (!tweetId || !isContextValid()) return;
+        const cleanText = typeof text === 'string' ? text.trim() : '';
+        if (!cleanText) return;
+        const meta = (fallbackMeta && fallbackMeta.screenName)
+            ? fallbackMeta
+            : (article ? extractTweetMetadataFromArticle(article, tweetId) : fallbackMeta);
+        locallyMarkedSeen.add(tweetId);
+        try {
+            chrome.runtime.sendMessage({
+                action: 'X_ADD_FORCE_COMMENT',
+                payload: { tweetId, text: cleanText, meta }
+            }, (response) => {
+                if (safeHasError() || !response || !response.success) return;
+                if (Array.isArray(response.comments)) {
+                    updateAllDomCommentSections(tweetId, response.comments, true, meta);
+                }
+                checkedTweetsGeneration++;
+                syncFriendsTimelineUI(true);
+            });
+        } catch (e) {}
+    }
+
+    function handleDeleteForceComment(tweetId, commentId, article = null) {
+        if (!tweetId || !commentId || !isContextValid()) return;
+        try {
+            chrome.runtime.sendMessage({
+                action: 'X_DELETE_FORCE_COMMENT',
+                payload: { tweetId, commentId }
+            }, (response) => {
+                if (safeHasError() || !response || !response.success) return;
+                if (Array.isArray(response.comments)) {
+                    updateAllDomCommentSections(tweetId, response.comments, undefined);
+                }
+                checkedTweetsGeneration++;
+                syncFriendsTimelineUI(true);
+            });
+        } catch (e) {}
+    }
+
     function handleToggleForceTweet(tweetId, shouldForce, article = null, fallbackMeta = null) {
         if (!tweetId || !isContextValid()) return;
 
@@ -490,8 +603,11 @@
                 chrome.runtime.sendMessage({
                     action: 'X_FORCE_TWEET_TO_FRIENDS',
                     payload: { tweetId, meta }
-                }, () => {
+                }, (response) => {
                     if (safeHasError()) return;
+                    if (response && response.success && Array.isArray(response.comments)) {
+                        updateAllDomCommentSections(tweetId, response.comments, true, meta);
+                    }
                     checkedTweetsGeneration++;
                     syncFriendsTimelineUI(true);
                 });
@@ -501,8 +617,11 @@
                 chrome.runtime.sendMessage({
                     action: 'X_UNFORCE_TWEET',
                     payload: { tweetId }
-                }, () => {
+                }, (response) => {
                     if (safeHasError()) return;
+                    if (response && response.success && Array.isArray(response.comments)) {
+                        updateAllDomCommentSections(tweetId, response.comments, response.comments.length > 0);
+                    }
                     checkedTweetsGeneration++;
                     syncFriendsTimelineUI(true);
                 });
@@ -635,6 +754,8 @@
 
         const callbacks = {
             onToggleForce: handleToggleForceTweet,
+            onAddForceComment: handleAddForceComment,
+            onDeleteForceComment: handleDeleteForceComment,
             onHydrateTweets: requestTweetsHydration,
             onPageAppended: () => {
                 observeTimelineArticles();
@@ -658,7 +779,7 @@
 
                 normIds.forEach(normId => {
                     addLocallyMarkedSeen(normId);
-                    dismissedForcedLocalSet.add(normId);
+                    recordLocalDismissal(normId);
                 });
 
                 if (cachedTimelineData && typeof cachedTimelineData === 'object') {
@@ -672,6 +793,8 @@
                             if (p && normIds.includes(String(p.tweetId))) {
                                 p.isDismissed = true;
                                 p.isSeenByMe = true;
+                                p.hasUnreadFriendComments = false;
+                                p.unreadFriendCommentIds = [];
                             }
                         });
                     }
@@ -721,9 +844,9 @@
         };
 
         const applyView = (data) => {
-            if (data && Array.isArray(data.unseenForcedPosts) && dismissedForcedLocalSet.size > 0) {
+            if (data && Array.isArray(data.unseenForcedPosts) && dismissedLocalCommentIdsMap.size > 0) {
                 data.unseenForcedPosts = data.unseenForcedPosts.filter(
-                    p => p && !dismissedForcedLocalSet.has(String(p.tweetId))
+                    p => p && !isLocallyDismissedPost(p)
                 );
             }
             if (tabList && typeof window.XLocationUI.ensureFriendsTimelineTab === 'function') {
@@ -1207,6 +1330,12 @@
                 delete article.dataset.xTweetId;
                 delete article.dataset.xFilterRevealed;
             }
+            if (typeof article.querySelectorAll === 'function') {
+                const staleComments = article.querySelectorAll('.x-force-comments-section');
+                staleComments.forEach(sec => {
+                    if (sec.parentNode) sec.parentNode.removeChild(sec);
+                });
+            }
             if (article._xAdCollapsed || article._xSavedInlineStyle !== undefined) {
                 if (window.XLocationUI && typeof window.XLocationUI.restoreAdTweet === 'function') {
                     window.XLocationUI.restoreAdTweet(article);
@@ -1373,7 +1502,7 @@
             (nowMs - lastForcedFeedCheckMs) >= 1500 &&
             cachedTimelineData &&
             Array.isArray(cachedTimelineData.unseenForcedPosts) &&
-            cachedTimelineData.unseenForcedPosts.some(p => p && !p.isDismissed && !dismissedForcedLocalSet.has(String(p.tweetId))) &&
+            cachedTimelineData.unseenForcedPosts.some(p => p && !p.isDismissed && !isLocallyDismissedPost(p)) &&
             !document.getElementById('x-forced-home-feed') &&
             ((typeof window !== 'undefined' && (window.scrollY || window.pageYOffset || 0)) || 0) <= 80;
         if (needsForcedFeedCheck) {
@@ -1408,7 +1537,10 @@
 
             if (window.XLocationUI && typeof window.XLocationUI.renderForceTweetButton === 'function') {
                 if (!article.querySelector('.x-force-friend-btn')) {
-                    window.XLocationUI.renderForceTweetButton(article, tweetId, {}, handleToggleForceTweet);
+                    window.XLocationUI.renderForceTweetButton(article, tweetId, {
+                        onAddComment: handleAddForceComment,
+                        onDeleteComment: handleDeleteForceComment
+                    }, handleToggleForceTweet);
                 }
             }
 
@@ -1437,11 +1569,13 @@
                 const seenMap = response.seenMap || {};
                 const forcedMap = response.forcedMap || {};
                 const myForcedSet = new Set(Array.isArray(response.myForcedIds) ? response.myForcedIds : []);
+                const commentsMap = response.commentsMap || {};
 
                 for (const [tweetId, targets] of tweetMap.entries()) {
                     const seenByFriends = seenMap[tweetId] || [];
                     const forcedByFriends = forcedMap[tweetId] || [];
                     const forcedByMe = myForcedSet.has(tweetId);
+                    const comments = Array.isArray(commentsMap[tweetId]) ? commentsMap[tweetId] : [];
 
                     for (const { article, headerElem, screenName } of targets) {
                         if (headerElem && (seenByFriends.length > 0 || forcedByFriends.length > 0)) {
@@ -1452,7 +1586,10 @@
                         if (article && window.XLocationUI && typeof window.XLocationUI.renderForceTweetButton === 'function') {
                             window.XLocationUI.renderForceTweetButton(article, tweetId, {
                                 forcedByMe,
-                                forcedByFriends
+                                forcedByFriends,
+                                comments,
+                                onAddComment: handleAddForceComment,
+                                onDeleteComment: handleDeleteForceComment
                             }, handleToggleForceTweet);
                         }
                     }
@@ -2201,7 +2338,7 @@
     // Track explicit user interactions (click, like, expand, video play) as immediate "seen"
     function handleUserInteraction(e) {
         if (!isFriendsSyncActive || !isContextValid() || !e.target || !e.target.closest) return;
-        if (e.target.closest('.x-force-friend-btn, .x-forced-dismiss-btn, .x-forced-dismiss-all-btn, .vsc-download-btn, .x-location-info-btn, .x-friend-seen-badge, #x-414-nav-trigger, #x-414-floating-pill')) return;
+        if (e.target.closest('.x-force-friend-btn, .x-forced-dismiss-btn, .x-forced-dismiss-all-btn, .x-force-comments-section, .vsc-download-btn, .x-location-info-btn, .x-friend-seen-badge, #x-414-nav-trigger, #x-414-floating-pill')) return;
         const article = e.target.closest('article[data-testid="tweet"]');
         if (!article || article._xAdCollapsed || checkIsAdTweet(article)) return;
         const tweetId = article.dataset?.xTweetId || extractTweetIdFromArticle(article);
@@ -2247,10 +2384,11 @@
                 if (request && (request.action === 'X_FRIENDS_SEEN_UPDATED' || request.action === 'X_FRIENDS_DISMISS_UPDATED')) {
                     if (request.action === 'X_FRIENDS_DISMISS_UPDATED' && request.payload) {
                         const rawIds = request.payload.tweetIds || (request.payload.tweetId ? [request.payload.tweetId] : []);
+                        const commentIdsMap = request.payload.commentIdsMap || {};
                         rawIds.forEach(rawId => {
                             const dismissedId = String(rawId || '').trim();
                             if (dismissedId) {
-                                dismissedForcedLocalSet.add(dismissedId);
+                                recordLocalDismissal(dismissedId, commentIdsMap[dismissedId] || null);
                                 if (cachedTimelineData && Array.isArray(cachedTimelineData.unseenForcedPosts)) {
                                     cachedTimelineData.unseenForcedPosts = cachedTimelineData.unseenForcedPosts.filter(
                                         p => p && String(p.tweetId || p) !== dismissedId
@@ -2294,6 +2432,10 @@
             node.classList.contains('x-location-inline-badge') ||
             node.classList.contains('x-force-friend-btn-wrap') ||
             node.classList.contains('x-force-friend-btn') ||
+            node.classList.contains('x-force-comments-section') ||
+            node.classList.contains('x-force-comment-composer') ||
+            node.classList.contains('x-force-comments-list') ||
+            node.classList.contains('x-force-comment-item') ||
             node.classList.contains('vsc-download-btn') ||
             node.classList.contains('x-tweet-filtered-placeholder') ||
             node.classList.contains('x-friend-seen-badge') ||
@@ -2336,7 +2478,7 @@
             if (
                 target &&
                 target.closest &&
-                target.closest('[data-testid="app-text-transition-container"], .x-location-inline-badge, .x-force-friend-btn-wrap, .vsc-download-btn, .x-tweet-filtered-placeholder, .x-friends-tab-badge, .x-friends-tab-presentation, .x-friends-filter-pill, .x-forced-home-title, .x-friends-load-more-btn, .x-card-badge, #x-414-nav-trigger, #x-414-floating-pill, #vsc-controller-host')
+                target.closest('[data-testid="app-text-transition-container"], .x-location-inline-badge, .x-force-friend-btn-wrap, .x-force-comments-section, .vsc-download-btn, .x-tweet-filtered-placeholder, .x-friends-tab-badge, .x-friends-tab-presentation, .x-friends-filter-pill, .x-forced-home-title, .x-friends-load-more-btn, .x-card-badge, #x-414-nav-trigger, #x-414-floating-pill, #vsc-controller-host')
             ) {
                 continue;
             }

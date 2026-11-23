@@ -1365,4 +1365,196 @@ article[data-testid="tweet"] .x-tweet-filtered-placeholder {
         max-width: calc(100vw - 32px);
         text-align: center;
     }
+
+    .x-force-comment-input {
+        font-size: 16px;
+    }
+}
+
+/* Inline Force Comments Section (Shared across Home Forced Banner, Friends Tab & Native X Tweets) */
+.x-card-badge-commented {
+    background: rgba(245, 158, 11, 0.22);
+    border: 1px solid rgba(245, 158, 11, 0.55);
+    color: #FBBF24;
+}
+
+.x-force-comments-section {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-radius: 12px;
+    border: 1px solid rgba(245, 158, 11, 0.28);
+    background: rgba(245, 158, 11, 0.05);
+    font-family: TwitterChirp, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+:root[data-x-theme="light"] .x-force-comments-section {
+    border-color: rgba(217, 119, 6, 0.28);
+    background: rgba(245, 158, 11, 0.07);
+}
+
+.x-force-comment-composer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+}
+
+.x-force-comment-input {
+    flex: 1;
+    min-width: 0;
+    appearance: none;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 9999px;
+    color: #e7e9ea;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.35;
+    padding: 6px 12px;
+    outline: none;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.x-force-comment-input::placeholder {
+    color: #71767b;
+}
+
+.x-force-comment-input:focus {
+    border-color: #F59E0B;
+    background: rgba(255, 255, 255, 0.09);
+}
+
+:root[data-x-theme="light"] .x-force-comment-input {
+    background: rgba(255, 255, 255, 0.85);
+    border-color: rgba(15, 20, 25, 0.18);
+    color: #0f1419;
+}
+
+:root[data-x-theme="light"] .x-force-comment-input:focus {
+    border-color: #D97706;
+    background: #ffffff;
+}
+
+.x-force-comment-send-btn {
+    appearance: none;
+    -webkit-appearance: none;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 9999px;
+    background: #F59E0B;
+    color: #0f1419;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 700;
+    padding: 6px 13px;
+    cursor: pointer;
+    transition: opacity 0.15s ease, background-color 0.15s ease, transform 0.1s ease;
+}
+
+.x-force-comment-send-btn:hover:not(:disabled) {
+    background: #FBBF24;
+}
+
+.x-force-comment-send-btn:active:not(:disabled) {
+    transform: scale(0.96);
+}
+
+.x-force-comment-send-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.x-force-comments-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.x-force-comment-item {
+    padding: 6px 9px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.04);
+    border-left: 2px solid rgba(245, 158, 11, 0.65);
+}
+
+.x-force-comment-item.is-me {
+    border-left-color: rgba(16, 185, 129, 0.75);
+    background: rgba(16, 185, 129, 0.06);
+}
+
+:root[data-x-theme="light"] .x-force-comment-item {
+    background: rgba(15, 20, 25, 0.04);
+}
+
+:root[data-x-theme="light"] .x-force-comment-item.is-me {
+    background: rgba(16, 185, 129, 0.08);
+}
+
+.x-force-comment-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    line-height: 1.2;
+    margin-bottom: 2px;
+}
+
+.x-force-comment-author {
+    font-weight: 700;
+    color: #FBBF24;
+}
+
+.x-force-comment-item.is-me .x-force-comment-author {
+    color: #34D399;
+}
+
+:root[data-x-theme="light"] .x-force-comment-author {
+    color: #B45309;
+}
+
+:root[data-x-theme="light"] .x-force-comment-item.is-me .x-force-comment-author {
+    color: #047857;
+}
+
+.x-force-comment-time {
+    color: #71767b;
+    font-size: 11.5px;
+}
+
+.x-force-comment-delete-btn {
+    appearance: none;
+    -webkit-appearance: none;
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 9999px;
+    border: none;
+    background: transparent;
+    color: #71767b;
+    cursor: pointer;
+    padding: 0;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.x-force-comment-delete-btn:hover {
+    background: rgba(239, 68, 68, 0.18);
+    color: #F87171;
+}
+
+.x-force-comment-text {
+    font-size: 13.5px;
+    line-height: 1.38;
+    color: #e7e9ea;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+:root[data-x-theme="light"] .x-force-comment-text {
+    color: #0f1419;
 }

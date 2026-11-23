@@ -279,6 +279,26 @@ export function handleMessage(request, sender, sendResponse) {
         return true;
     }
 
+    if (request.action === "X_ADD_FORCE_COMMENT") {
+        const { tweetId, text, meta } = request.payload || {};
+        friendsSync.addForceComment(tweetId, text, meta).then(res => {
+            sendResponse({ success: true, ...res });
+        }).catch(err => {
+            sendResponse({ success: false, error: err.message });
+        });
+        return true;
+    }
+
+    if (request.action === "X_DELETE_FORCE_COMMENT") {
+        const { tweetId, commentId } = request.payload || {};
+        friendsSync.deleteForceComment(tweetId, commentId).then(res => {
+            sendResponse({ success: true, ...res });
+        }).catch(err => {
+            sendResponse({ success: false, error: err.message });
+        });
+        return true;
+    }
+
     if (request.action === "X_DISMISS_FORCED_TWEET") {
         const { tweetId, tweetIds } = request.payload || {};
         const target = tweetIds || tweetId;

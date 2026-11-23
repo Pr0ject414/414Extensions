@@ -23,7 +23,8 @@
     font-weight: bold;
 }
 
-.vsc-hidden .vsc-controller {
+.vsc-hidden .vsc-controller,
+.vsc-fs-hidden .vsc-controller {
     display: none;
 }
 

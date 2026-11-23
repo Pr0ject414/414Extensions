@@ -43,6 +43,9 @@ export const FRIEND_SYNC_CONFIG = {
     MIN_AUTO_SYNC_INTERVAL_MS: 30000, // Minimum interval between timeline-triggered relay syncs
     MAX_SEEN_IDS: 1000,          // Rolling cap of 1,000 seen tweet IDs per user
     MAX_FORCED_IDS: 100,         // Rolling cap of 100 forced tweet IDs per user
+    MAX_COMMENT_LENGTH: 500,     // Max characters per force comment
+    MAX_COMMENTS_PER_TWEET: 25,  // Rolling cap of comments per user per forced tweet
+    MAX_TOTAL_MY_COMMENTS: 200,  // Rolling cap of total local force comments per user
     MAX_POST_META_ENTRIES: 25,   // Compact Nostr payload: forced posts + top 25 recent seen posts (<35KB)
     MAX_LOCAL_POST_META: 250,    // Local storage LRU cap of 250 post metadata entries
     MAX_TIMELINE_ITEMS: 300,     // Max merged timeline items returned over IPC per query
