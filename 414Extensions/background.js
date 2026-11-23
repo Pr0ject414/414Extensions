@@ -44,6 +44,8 @@ moduleManager.register(XBackground, {
         "X_CHECK_TWEETS_SEEN",
         "X_FORCE_TWEET_TO_FRIENDS",
         "X_UNFORCE_TWEET",
+        "X_ADD_FORCE_COMMENT",
+        "X_DELETE_FORCE_COMMENT",
         "X_DISMISS_FORCED_TWEET",
         "X_GET_FRIENDS_TIMELINE",
         "X_HYDRATE_TWEETS"

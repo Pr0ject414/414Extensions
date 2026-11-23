@@ -1,4 +1,7 @@
 import { jest } from '@jest/globals';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 // Mock chrome API before importing modules
 let messageListener;
@@ -68,6 +71,7 @@ global.console = {
 // Import background.js which attaches listeners
 await import('../background.js');
 import * as AppState from '../shared_modules/appState.js';
+import { moduleManager } from '../shared_modules/moduleManager.js';
 
 describe('background coordinator message routing', () => {
     beforeEach(() => {
@@ -122,5 +126,47 @@ describe('background coordinator message routing', () => {
             volumeModuleEnabled: expect.any(Boolean),
             vscModuleEnabled: expect.any(Boolean),
         }));
+    });
+
+    test('routes X_ADD_FORCE_COMMENT and X_DELETE_FORCE_COMMENT to XBackground instead of dropping them', async () => {
+        const addSendResponse = jest.fn();
+        const addResult = messageListener({
+            action: 'X_ADD_FORCE_COMMENT',
+            payload: { tweetId: '1850000000000009999', text: 'Test comment' }
+        }, {}, addSendResponse);
+
+        expect(addResult).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(addSendResponse).toHaveBeenCalledWith({
+            success: false,
+            error: expect.any(String)
+        });
+
+        const delSendResponse = jest.fn();
+        const delResult = messageListener({
+            action: 'X_DELETE_FORCE_COMMENT',
+            payload: { tweetId: '1850000000000009999', commentId: 'c_missing' }
+        }, {}, delSendResponse);
+
+        expect(delResult).toBe(true);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        expect(delSendResponse).toHaveBeenCalledWith(expect.objectContaining({
+            success: true,
+            deleted: false
+        }));
+    });
+
+    test('every X action handled in xBackground.js is registered in background.js moduleManager', () => {
+        const __dirname = path.dirname(fileURLToPath(import.meta.url));
+        const xBgPath = path.resolve(__dirname, '..', 'x_extension', 'xBackground.js');
+        const xBgSource = fs.readFileSync(xBgPath, 'utf8');
+        const actionMatches = Array.from(xBgSource.matchAll(/request\.action\s*===\s*["']([^"']+)["']/g))
+            .map(m => m[1]);
+        expect(actionMatches.length).toBeGreaterThan(0);
+
+        for (const action of actionMatches) {
+            const isRegistered = moduleManager.modules.some(m => m.actions.has(action));
+            expect({ action, isRegistered }).toEqual({ action, isRegistered: true });
+        }
     });
 });

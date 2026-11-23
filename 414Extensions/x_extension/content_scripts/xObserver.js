@@ -551,6 +551,37 @@
         });
     }
 
+    function rollbackFailedPendingComments(tweetId, clearType = 'all') {
+        if (!tweetId) return;
+        const cards = document.querySelectorAll(`article[data-tweet-id="${tweetId}"], article[data-x-tweet-id="${tweetId}"]`);
+        cards.forEach(card => {
+            const btn = card.querySelector('.x-force-friend-btn');
+            const isForced = Boolean(
+                (btn && (btn.classList.contains('is-forced') || btn.classList.contains('is-friend-forced'))) ||
+                card.classList.contains('is-forced-card')
+            );
+            const sections = card.querySelectorAll('.x-force-comments-section');
+            sections.forEach(sec => {
+                if (clearType === 'all' || clearType === 'adds') {
+                    sec._xPendingAdds = [];
+                }
+                if ((clearType === 'all' || clearType === 'deletes') && sec._xPendingDeletes instanceof Map) {
+                    sec._xPendingDeletes.clear();
+                }
+                if (window.XLocationUI && typeof window.XLocationUI.renderForceCommentsSection === 'function') {
+                    const opts = sec._xCommentOptions || {};
+                    window.XLocationUI.renderForceCommentsSection(card, tweetId, {
+                        isForced,
+                        comments: Array.isArray(opts.comments) ? opts.comments : undefined,
+                        onAddComment: handleAddForceComment,
+                        onDeleteComment: handleDeleteForceComment,
+                        meta: opts.meta || (card._xPostItem && card._xPostItem.meta) || null
+                    });
+                }
+            });
+        });
+    }
+
     function handleAddForceComment(tweetId, text, article = null, fallbackMeta = null) {
         if (!tweetId || !isContextValid()) return;
         const cleanText = typeof text === 'string' ? text.trim() : '';
@@ -564,14 +595,29 @@
                 action: 'X_ADD_FORCE_COMMENT',
                 payload: { tweetId, text: cleanText, meta }
             }, (response) => {
-                if (safeHasError() || !response || !response.success) return;
+                if (safeHasError() || !response || !response.success) {
+                    rollbackFailedPendingComments(tweetId, 'adds');
+                    const errMsg = response && response.error
+                        ? `Failed to send comment: ${response.error}`
+                        : 'Failed to send comment — try reloading the extension';
+                    if (window.XLocationUI && typeof window.XLocationUI.showToast === 'function') {
+                        window.XLocationUI.showToast(errMsg);
+                    }
+                    syncFriendsTimelineUI(true);
+                    return;
+                }
                 if (Array.isArray(response.comments)) {
                     updateAllDomCommentSections(tweetId, response.comments, true, meta);
                 }
                 checkedTweetsGeneration++;
                 syncFriendsTimelineUI(true);
             });
-        } catch (e) {}
+        } catch (e) {
+            rollbackFailedPendingComments(tweetId, 'adds');
+            if (window.XLocationUI && typeof window.XLocationUI.showToast === 'function') {
+                window.XLocationUI.showToast('Failed to send comment — try reloading the extension');
+            }
+        }
     }
 
     function handleDeleteForceComment(tweetId, commentId, article = null) {
@@ -581,14 +627,29 @@
                 action: 'X_DELETE_FORCE_COMMENT',
                 payload: { tweetId, commentId }
             }, (response) => {
-                if (safeHasError() || !response || !response.success) return;
+                if (safeHasError() || !response || !response.success) {
+                    rollbackFailedPendingComments(tweetId, 'deletes');
+                    const errMsg = response && response.error
+                        ? `Failed to delete comment: ${response.error}`
+                        : 'Failed to delete comment — try reloading the extension';
+                    if (window.XLocationUI && typeof window.XLocationUI.showToast === 'function') {
+                        window.XLocationUI.showToast(errMsg);
+                    }
+                    syncFriendsTimelineUI(true);
+                    return;
+                }
                 if (Array.isArray(response.comments)) {
                     updateAllDomCommentSections(tweetId, response.comments, undefined);
                 }
                 checkedTweetsGeneration++;
                 syncFriendsTimelineUI(true);
             });
-        } catch (e) {}
+        } catch (e) {
+            rollbackFailedPendingComments(tweetId, 'deletes');
+            if (window.XLocationUI && typeof window.XLocationUI.showToast === 'function') {
+                window.XLocationUI.showToast('Failed to delete comment — try reloading the extension');
+            }
+        }
     }
 
     function handleToggleForceTweet(tweetId, shouldForce, article = null, fallbackMeta = null) {

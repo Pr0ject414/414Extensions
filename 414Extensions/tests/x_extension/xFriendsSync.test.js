@@ -1154,5 +1154,109 @@ describe('XFriendsSyncManager', () => {
         );
         expect(bobManager.lastSyncNotifications.newForceComments).toEqual([]);
     });
+
+    test('publishMySeenSnapshot returns false and keeps hasUnpublishedSeen=true when relay responds with OK false rejection', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        try {
+            const rejectingManager = new XFriendsSyncManager({
+                relays: ['wss://rejecting.relay'],
+                batchMaxRetries: 0,
+                webSocketFactory: () => {
+                    const ws = {
+                        readyState: 0,
+                        onopen: null,
+                        onmessage: null,
+                        onerror: null,
+                        onclose: null,
+                        send(raw) {
+                            const msg = JSON.parse(raw);
+                            if (msg[0] === 'EVENT') {
+                                const ev = msg[1];
+                                setTimeout(() => {
+                                    if (ws.onmessage) {
+                                        ws.onmessage({
+                                            data: JSON.stringify(['OK', ev.id, false, 'event too large'])
+                                        });
+                                    }
+                                }, 5);
+                            }
+                        },
+                        close() {
+                            ws.readyState = 3;
+                        }
+                    };
+                    setTimeout(() => {
+                        ws.readyState = 1;
+                        if (ws.onopen) ws.onopen();
+                    }, 2);
+                    return ws;
+                }
+            });
+
+            await rejectingManager.init();
+            rejectingManager.state.identity = {
+                email: 'alice@example.com',
+                displayName: 'Alice',
+                passphrase: '',
+                privKeyHex: '1'.repeat(64),
+                pubkeyHex: '2'.repeat(64),
+                seenFeedKeyHex: '3'.repeat(64),
+                identityCreatedAt: Date.now()
+            };
+            await rejectingManager.markTweetsSeen(['1850000000000004999']);
+
+            const ok = await rejectingManager.publishMySeenSnapshot();
+            expect(ok).toBe(false);
+            expect(rejectingManager.state.hasUnpublishedSeen).toBe(true);
+        } finally {
+            warnSpy.mockRestore();
+        }
+    });
+
+    test('concurrent init() calls share a single storage read without clobbering state', async () => {
+        const recentForcedAt = Date.now();
+        const storedState = {
+            identity: {
+                email: 'alice@example.com',
+                displayName: 'Alice',
+                passphrase: '',
+                privKeyHex: '1'.repeat(64),
+                pubkeyHex: '2'.repeat(64),
+                seenFeedKeyHex: '3'.repeat(64)
+            },
+            myForcedMap: {
+                '1850000000000005001': { id: '1850000000000005001', forcedAt: recentForcedAt }
+            }
+        };
+        storageMap.set('x_friends_sync_state_v1', storedState);
+
+        let resolveGet;
+        global.chrome.storage.local.get = jest.fn(() => new Promise(resolve => {
+            resolveGet = resolve;
+        }));
+
+        const mgr = new XFriendsSyncManager({
+            relays: ['wss://mock.relay'],
+            webSocketFactory: () => relayHub.createSocket()
+        });
+
+        const p1 = mgr.init();
+        const p2 = mgr.init();
+        const p3 = mgr.init();
+
+        expect(global.chrome.storage.local.get).toHaveBeenCalledTimes(1);
+        resolveGet({ x_friends_sync_state_v1: storedState });
+        await Promise.all([p1, p2, p3]);
+
+        expect(mgr.isLoaded).toBe(true);
+        expect(mgr.state.myForcedMap['1850000000000005001']).toEqual({
+            id: '1850000000000005001',
+            forcedAt: recentForcedAt
+        });
+
+        // Subsequent init() call after load is a no-op
+        await mgr.init();
+        expect(global.chrome.storage.local.get).toHaveBeenCalledTimes(1);
+    });
 });
 

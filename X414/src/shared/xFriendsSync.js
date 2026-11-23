@@ -59,6 +59,7 @@ export class XFriendsSyncManager {
             : (FRIEND_SYNC_CONFIG.RELAY_BATCH_RETRY_DELAY_MS ?? 800);
         this.onNotification = options.onNotification || null;
         this.isLoaded = false;
+        this._initPromise = null;
         this.isSyncing = false;
         this.pendingSyncRequested = false;
         this.lastSyncTime = null;
@@ -112,41 +113,50 @@ export class XFriendsSyncManager {
 
     async init() {
         if (this.isLoaded) return;
-        try {
-            const stored = await chrome.storage.local.get([X_FRIENDS_STATE_KEY]);
-            if (stored && stored[X_FRIENDS_STATE_KEY]) {
-                const loaded = stored[X_FRIENDS_STATE_KEY];
-                this.state.identity = loaded.identity || null;
-                this.state.friends = loaded.friends || {};
-                this.state.removedFriends = (loaded.removedFriends && typeof loaded.removedFriends === 'object') ? loaded.removedFriends : {};
-                this.state.mySeenIds = Array.isArray(loaded.mySeenIds) ? loaded.mySeenIds : [];
-                this.state.friendSeenMap = loaded.friendSeenMap || {};
-                this.state.postMetaMap = (loaded.postMetaMap && typeof loaded.postMetaMap === 'object') ? loaded.postMetaMap : {};
-                this.state.myForcedMap = (loaded.myForcedMap && typeof loaded.myForcedMap === 'object') ? loaded.myForcedMap : {};
-                this.state.unforcedMap = (loaded.unforcedMap && typeof loaded.unforcedMap === 'object') ? loaded.unforcedMap : {};
-                this.state.friendForcedMap = (loaded.friendForcedMap && typeof loaded.friendForcedMap === 'object') ? loaded.friendForcedMap : {};
-                this.state.myForcedCommentsMap = (loaded.myForcedCommentsMap && typeof loaded.myForcedCommentsMap === 'object') ? loaded.myForcedCommentsMap : {};
-                this.state.deletedCommentsMap = (loaded.deletedCommentsMap && typeof loaded.deletedCommentsMap === 'object') ? loaded.deletedCommentsMap : {};
-                this.state.friendCommentsMap = (loaded.friendCommentsMap && typeof loaded.friendCommentsMap === 'object') ? loaded.friendCommentsMap : {};
-                this.state.dismissedForcedIds = Array.isArray(loaded.dismissedForcedIds) ? loaded.dismissedForcedIds : [];
-                this.state.notifiedForcedIds = Array.isArray(loaded.notifiedForcedIds) ? loaded.notifiedForcedIds : [];
-                this.state.dismissedCommentIds = Array.isArray(loaded.dismissedCommentIds) ? loaded.dismissedCommentIds : [];
-                this.state.notifiedCommentIds = Array.isArray(loaded.notifiedCommentIds) ? loaded.notifiedCommentIds : [];
-                this.state.notifiedInviteEmails = Array.isArray(loaded.notifiedInviteEmails) ? loaded.notifiedInviteEmails : [];
-                this.state.hasUnpublishedSeen = Boolean(loaded.hasUnpublishedSeen);
-                this.state.preferencesUpdatedAt = Number(loaded.preferencesUpdatedAt) || 0;
-                this.state.lastKnownPrefsJson = typeof loaded.lastKnownPrefsJson === 'string' ? loaded.lastKnownPrefsJson : '';
-                this.state.selfSyncLastSyncedAt = loaded.selfSyncLastSyncedAt || null;
-                this.state.relayHealth = (loaded.relayHealth && typeof loaded.relayHealth === 'object') ? loaded.relayHealth : {};
+        if (this._initPromise) return this._initPromise;
+        this._initPromise = (async () => {
+            try {
+                const stored = await chrome.storage.local.get([X_FRIENDS_STATE_KEY]);
+                if (stored && stored[X_FRIENDS_STATE_KEY]) {
+                    const loaded = stored[X_FRIENDS_STATE_KEY];
+                    this.state.identity = loaded.identity || null;
+                    this.state.friends = loaded.friends || {};
+                    this.state.removedFriends = (loaded.removedFriends && typeof loaded.removedFriends === 'object') ? loaded.removedFriends : {};
+                    this.state.mySeenIds = Array.isArray(loaded.mySeenIds) ? loaded.mySeenIds : [];
+                    this.state.friendSeenMap = loaded.friendSeenMap || {};
+                    this.state.postMetaMap = (loaded.postMetaMap && typeof loaded.postMetaMap === 'object') ? loaded.postMetaMap : {};
+                    this.state.myForcedMap = (loaded.myForcedMap && typeof loaded.myForcedMap === 'object') ? loaded.myForcedMap : {};
+                    this.state.unforcedMap = (loaded.unforcedMap && typeof loaded.unforcedMap === 'object') ? loaded.unforcedMap : {};
+                    this.state.friendForcedMap = (loaded.friendForcedMap && typeof loaded.friendForcedMap === 'object') ? loaded.friendForcedMap : {};
+                    this.state.myForcedCommentsMap = (loaded.myForcedCommentsMap && typeof loaded.myForcedCommentsMap === 'object') ? loaded.myForcedCommentsMap : {};
+                    this.state.deletedCommentsMap = (loaded.deletedCommentsMap && typeof loaded.deletedCommentsMap === 'object') ? loaded.deletedCommentsMap : {};
+                    this.state.friendCommentsMap = (loaded.friendCommentsMap && typeof loaded.friendCommentsMap === 'object') ? loaded.friendCommentsMap : {};
+                    this.state.dismissedForcedIds = Array.isArray(loaded.dismissedForcedIds) ? loaded.dismissedForcedIds : [];
+                    this.state.notifiedForcedIds = Array.isArray(loaded.notifiedForcedIds) ? loaded.notifiedForcedIds : [];
+                    this.state.dismissedCommentIds = Array.isArray(loaded.dismissedCommentIds) ? loaded.dismissedCommentIds : [];
+                    this.state.notifiedCommentIds = Array.isArray(loaded.notifiedCommentIds) ? loaded.notifiedCommentIds : [];
+                    this.state.notifiedInviteEmails = Array.isArray(loaded.notifiedInviteEmails) ? loaded.notifiedInviteEmails : [];
+                    this.state.hasUnpublishedSeen = Boolean(loaded.hasUnpublishedSeen);
+                    this.state.preferencesUpdatedAt = Number(loaded.preferencesUpdatedAt) || 0;
+                    this.state.lastKnownPrefsJson = typeof loaded.lastKnownPrefsJson === 'string' ? loaded.lastKnownPrefsJson : '';
+                    this.state.selfSyncLastSyncedAt = loaded.selfSyncLastSyncedAt || null;
+                    this.state.relayHealth = (loaded.relayHealth && typeof loaded.relayHealth === 'object') ? loaded.relayHealth : {};
+                }
+            } catch (err) {
+                console.warn('X Friends Sync: Failed to load state from storage', err);
             }
-        } catch (err) {
-            console.warn('X Friends Sync: Failed to load state from storage', err);
-        }
 
-        this.restoreRelayHealthFromState();
-        this.pruneMySeenIds();
-        this.rebuildIndex();
-        this.isLoaded = true;
+            this.restoreRelayHealthFromState();
+            this.pruneMySeenIds();
+            this.rebuildIndex();
+            this.isLoaded = true;
+        })();
+
+        try {
+            return await this._initPromise;
+        } finally {
+            this._initPromise = null;
+        }
     }
 
     restoreRelayHealthFromState() {
@@ -3238,7 +3248,8 @@ export class XFriendsSyncManager {
 
         const result = await new Promise((resolve) => {
             let settled = false;
-            let okCount = 0;
+            const seenOkIds = new Set();
+            const acceptedIds = new Set();
             let closedEarly = false;
 
             const finish = (didSucceed) => {
@@ -3253,18 +3264,27 @@ export class XFriendsSyncManager {
 
             const onClose = () => {
                 closedEarly = true;
-                finish(okCount > 0);
+                finish(acceptedIds.size > 0);
             };
 
-            const timer = setTimeout(() => finish(okCount > 0), FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
+            const timer = setTimeout(() => finish(acceptedIds.size > 0), FRIEND_SYNC_CONFIG.RELAY_TIMEOUT_MS);
             if (typeof timer?.unref === 'function') timer.unref();
 
             const onMessage = (msg) => {
                 try {
                     const data = JSON.parse(msg.data);
                     if (Array.isArray(data) && data[0] === 'OK' && targetIds.has(data[1])) {
-                        okCount++;
-                        if (okCount >= events.length) finish(true);
+                        seenOkIds.add(data[1]);
+                        const isDuplicateReason = typeof data[3] === 'string' && data[3].toLowerCase().includes('duplicate');
+                        const isAccepted = data[2] !== false || isDuplicateReason;
+                        if (isAccepted) {
+                            acceptedIds.add(data[1]);
+                        } else {
+                            console.warn('X Friends Sync: Relay rejected event', relayUrl, data[1], data[3] || '');
+                        }
+                        if (seenOkIds.size >= targetIds.size) {
+                            finish(acceptedIds.size >= targetIds.size);
+                        }
                     }
                 } catch (e) {}
             };
